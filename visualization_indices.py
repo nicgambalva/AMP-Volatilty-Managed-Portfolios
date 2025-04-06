@@ -1,3 +1,4 @@
+# Testing the push on GitHub
 # Avoid warning messages which do not warrant raising an exception or terminating program
 import warnings 
 warnings.filterwarnings("ignore")
@@ -12,6 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.ticker as ticker
 import scipy.optimize as sco
+
 
 #################################################################################################################################
 # Index Futures, following Kang, J., & Kwon, K. Y. (2021). and Van Hemert et al. (2018)
@@ -43,8 +45,6 @@ daily_Price_Index_Futures_from_2004 = daily_Price_Index_Futures.loc["2004-04-02"
 
 # Calculate the daily returns using formula
 # Example for DAX 30: R_t = (GX2_t/ GX2_t) - 1
-
-
 daily_Returns_Index_Futures = {
     "DAX": daily_Price_Index_Futures_from_2004["GX2 Index"] / daily_Price_Index_Futures_from_2004["GX1 Index"] - 1,
     "CAC 40": daily_Price_Index_Futures_from_2004["CF2 Index"] / daily_Price_Index_Futures_from_2004["CF1 Index"] - 1,
@@ -66,6 +66,7 @@ def describe(data):
     ax.axis('off')
     ax.table(cellText=cell_text, colLabels=["Statistic"] + table_data.columns.tolist(), loc='center')
     plt.show()
+
 
 describe(daily_Returns_Index_Futures)
 
@@ -316,7 +317,7 @@ describe(market_returns_df) #I got ridiculously high values for the mean and std
 
 #################################################################################################################################
 # Following paper by Van Hemert et al. (2018) we have plotted the daily, monthly and annual excess returns
-# and the wealth index. The plot has been added to check wether returns are clustered.
+# and the wealth index. The plot has been added to check wether returns are clustered. (Similar to Exibit 3)
 
 # We need to construct it for the market portfolio too
 #################################################################################################################################
