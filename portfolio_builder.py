@@ -301,6 +301,9 @@ class Contract:
                 self.underlying_data = self.underlying_data
             else:
                 raise ValueError("Underlying data must be a Series with a datetime index.")
+        
+        if px_settle is None or px_settle.empty:
+            raise ValueError(f"PX_SETTLE data is missing for contract {contract}")
     
     ###########################################################################
     
@@ -548,8 +551,8 @@ class Future:
                 if contracts_found == (maturity_delta + 1):
                     return contract
                 
-        # If no contract is found, return None
-        return None
+        # If no contract is found, we raise an error
+        raise ValueError(f"No contract found for future {self.name} for date {date}.")
     
     def get_data_date(self, date: pd.Timestamp, price_type: str):
         """
@@ -643,6 +646,12 @@ class Future:
             raise ValueError(f"No contracts available for future {self.name}.")
         contracts_sorted = sorted(self.contracts, key=lambda x: x.start_date)
         first_contract = contracts_sorted[0]
+        try:
+            if self.currency_object is not None:
+                if first_contract.start_date < self.currency_dates[0]:
+                    first_contract.start_date = self.currency_dates[0]
+        except Exception as e:
+            raise ValueError(f"Error getting the first date from the currency data: {e}")
         return first_contract.start_date
     
     def get_last_data_date(self):
@@ -654,6 +663,12 @@ class Future:
             raise ValueError(f"No contracts available for future {self.name}.")
         contracts_sorted = sorted(self.contracts, key=lambda x: x.last_trade_date)
         last_contract = contracts_sorted[-1]
+        try:
+            if self.currency_object is not None:
+                if last_contract.last_trade_date > self.currency_dates[-1]:
+                    last_contract.last_trade_date = self.currency_dates[-1]
+        except Exception as e:
+            raise ValueError(f"Error getting the last date from the currency data: {e}")
         return last_contract.last_trade_date
     
     def get_all_dates(self):
@@ -666,6 +681,11 @@ class Future:
         all_dates = pd.DatetimeIndex([])
         for contract in self.contracts:
             all_dates = all_dates.union(contract.PX_SETTLE.index)
+        # TODO: This will be hardcoded for now, but we will change it later
+        # We set a maximum date for all the futures
+        # It is set to the 30th of April 2025
+        max_date = pd.Timestamp('2025-04-08')
+        all_dates = all_dates[all_dates <= max_date]
         all_dates = all_dates.drop_duplicates()
         return all_dates
     
@@ -784,6 +804,7 @@ class Future:
         # Checking that the sd_filter is a positive integer
         if not isinstance(sd_filter, int) or sd_filter < 0:
             raise ValueError("sd_filter must be a positive integer.")
+                
         
         try:
             self.roll_settle_theoretical = self.return_roll_settle(initial_investment, date_delta, maturity_delta, start_date, end_date)
@@ -839,9 +860,9 @@ class Future:
                 # And if there are dates for which px_last is not available for those dates
                 # We will interpolate the px_last to get the values for those dates
                 # Getting the dates
-                dates = pd.to_datetime(self.get_all_dates())
-                dates = dates[(dates >= start_date) & (dates <= end_date)]
-                dates = dates.sort_values()
+                # dates = pd.to_datetime(self.get_all_dates())
+                # dates = dates[(dates >= start_date) & (dates <= end_date)]
+                # dates = dates.sort_values()
                 
                 # Getting the currency data for the dates
                 currency_data = self.currency_object.px_last.loc[self.roll_settle_theoretical.index]
