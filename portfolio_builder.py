@@ -49,6 +49,12 @@ FUTURES_METALS = {
     'Aluminium': 'LA1 Comdty' # Aluminium - LME-LME Benchmark Monitor
 }
 
+# Dictionary with the supported metals futures
+SUPPORTED_METALS = {
+    'Gold': 'GC1 Comdty', # Gold - CMX-COMEX division of NYMEX
+    'Silver': 'SI1 Comdty' # Silver - CMX-COMEX division of NYMEX
+}
+
 # Dictionary of possible price types
 SUPPORTED_PRICE_TYPES = {
     'PX_BID': 'Bid Price',
@@ -306,11 +312,85 @@ class Contract:
         return hash(self.name)
 
 
+class Currency:
+    """A class that represents a currency. This is made to organize the data for foreign exchange rates."""
+    def __init__(self, name: str, base_currency: str, quote_currency: str, px_bid: pd.Series, px_ask: pd.Series, px_last: pd.Series):
+        self.name = name
+        self.base_currency = base_currency
+        self.quote_currency = quote_currency
+        self.px_bid = px_bid
+        self.px_ask = px_ask
+        self.px_last = px_last
+        
+        # Explicit type checking
+        if not isinstance(self.name, str):
+            raise TypeError("Currency name must be a string.")
+        if not isinstance(self.base_currency, str):
+            raise TypeError("Base currency must be a string.")
+        if not isinstance(self.quote_currency, str):
+            raise TypeError("Quote currency must be a string.")
+        if self.px_bid is not None and not isinstance(self.px_bid, pd.Series):
+            raise TypeError("PX_BID must be a pandas Series.")
+        if self.px_ask is not None and not isinstance(self.px_ask, pd.Series):
+            raise TypeError("PX_ASK must be a pandas Series.")
+        if self.px_last is not None and not isinstance(self.px_last, pd.Series):
+            raise TypeError("PX_LAST must be a pandas Series.")
+        
+        # Dropping all the prices that do not have an associated date, or that value is NaT
+        if self.px_bid is not None:
+            self.px_bid = self.px_bid.dropna()
+            self.px_bid = self.px_bid[~self.px_bid.index.isna()]
+            self.px_bid = self.px_bid[~self.px_bid.index.isin([pd.NaT])]
+            self.px_bid = self.px_bid[~self.px_bid.index.duplicated(keep='first')]
+        if self.px_ask is not None:
+            self.px_ask = self.px_ask.dropna()
+            self.px_ask = self.px_ask[~self.px_ask.index.isna()]
+            self.px_ask = self.px_ask[~self.px_ask.index.isin([pd.NaT])]
+            self.px_ask = self.px_ask[~self.px_ask.index.duplicated(keep='first')]
+        if self.px_last is not None:
+            self.px_last = self.px_last.dropna()
+            self.px_last = self.px_last[~self.px_last.index.isna()]
+            self.px_last = self.px_last[~self.px_last.index.isin([pd.NaT])]
+            self.px_last = self.px_last[~self.px_last.index.duplicated(keep='first')]
+        
+        self.start_date = None
+        self.end_date = None
+        
+        # We try to get the first common date from the data (px_bid, px_ask, px_last)
+        # And the last common date from the data (px_bid, px_ask, px_last)
+        # Then we filter the data to only include the dates between the first and last common date
+        try:
+            first_bid = self.px_bid.index[0]
+            first_ask = self.px_ask.index[0]
+            first_last = self.px_last.index[0]
+            
+            last_bid = self.px_bid.index[-1]
+            last_ask = self.px_ask.index[-1]
+            last_last = self.px_last.index[-1]
+            
+            self.start_date = max(first_bid, first_ask, first_last)
+            self.end_date = min(last_bid, last_ask, last_last)
+            
+            self.px_bid = self.px_bid[(self.px_bid.index >= self.start_date) & (self.px_bid.index <= self.end_date)]
+            self.px_ask = self.px_ask[(self.px_ask.index >= self.start_date) & (self.px_ask.index <= self.end_date)]
+            self.px_last = self.px_last[(self.px_last.index >= self.start_date) & (self.px_last.index <= self.end_date)]
+        except Exception as e:
+            raise ValueError(f"Error getting the first and last common date from the data: {e}")
+        
+    ############################################################################
+    
+    def __repr__(self):
+        return f"FX: {self.name}, Base Currency: {self.base_currency}, Quote Currency: {self.quote_currency}, Start Date: {self.start_date}, Last Trade Date: {self.end_date}"
+    def __str__(self):
+        return f"Currency({self.name}, {self.base_currency}/{self.quote_currency}, from {self.start_date} to {self.end_date})"
+    def __hash__(self):
+        return hash(self.name)
+
 
 class Future:
     """A class that represents a collection of futures contracts with the same underlying asset.
     It can handle both index and metal futures (with the potential to add more in the future)."""
-    def __init__(self, name: str, type: str, currency: str, calendar: dict, underlying_data: pd.Series = None):
+    def __init__(self, name: str, type: str, currency: str, calendar: dict, underlying_data: pd.Series = None, currency_object: Currency = None):
         self.name = name
         self.type = type
         self.currency = currency
@@ -345,6 +425,15 @@ class Future:
         self.realized_vol_undr_log_3MROLL = None
         self.realized_vol_undr_log_6MROLL = None
         self.realized_vol_undr_log_12MROLL = None
+        
+        self.currency_object = currency_object
+        if self.currency_object is not None:
+            if not isinstance(currency_object, Currency):
+                raise ValueError("Currency object must be an instance of Currency.")
+
+            self.base_currency = currency_object.base_currency
+            self.quote_currency = currency_object.quote_currency
+            self.currency_dates = currency_object.px_last.index
         
         # Explicit type checking
         if not isinstance(self.name, str):
@@ -405,6 +494,7 @@ class Future:
                 raise ValueError(f"Contract {contract_obj.name} currency {contract_obj.currency} does not match future {self.name} currency {self.currency}.")
             self.contracts.append(contract_obj)
             self.contracts_dict[contract_obj.name] = contract_obj
+            
         else:
             raise ValueError("Contract must be an instance of contract.")
         
@@ -741,6 +831,123 @@ class Future:
             self.realized_vol_roll_log_3MROLL = realized_vol_roll_log_3MROLL
             self.realized_vol_roll_log_6MROLL = realized_vol_roll_log_6MROLL
             self.realized_vol_roll_log_12MROLL = realized_vol_roll_log_12MROLL
+        
+            # If the currency object is not None, we will also build the realized volatility for the fx rate returns
+            # And the net realized volatility for the future (we first transform the price to the base currency, then we calculate the returns)
+            if self.currency_object is not None:
+                # We get all the dates get_all_dates
+                # And if there are dates for which px_last is not available for those dates
+                # We will interpolate the px_last to get the values for those dates
+                # Getting the dates
+                dates = pd.to_datetime(self.get_all_dates())
+                dates = dates[(dates >= start_date) & (dates <= end_date)]
+                dates = dates.sort_values()
+                
+                # Getting the currency data for the dates
+                currency_data = self.currency_object.px_last.loc[self.roll_settle_theoretical.index]
+                currency_data = currency_data.dropna()
+                currency_data = currency_data[~currency_data.index.isna()]
+                currency_data = currency_data[~currency_data.index.isin([pd.NaT])]
+                currency_data = currency_data[~currency_data.index.duplicated(keep='first')]
+                currency_data = currency_data.reindex(self.roll_settle_theoretical.index, method='ffill')
+                
+                # Getting the currency returns and log returns
+                currency_returns = currency_data.pct_change()
+                currency_log_returns = np.log(currency_data / currency_data.shift(1))
+                
+                # Filtering the returns and log returns using the sd_filter (number of standard deviations from the mean)
+                sd_currency_returns = currency_returns.std()
+                sd_currency_log_returns = currency_log_returns.std()
+                ub_currency_returns = currency_returns.mean() + sd_filter * sd_currency_returns
+                lb_currency_returns = currency_returns.mean() - sd_filter * sd_currency_returns
+                ub_currency_log_returns = currency_log_returns.mean() + sd_filter * sd_currency_log_returns
+                lb_currency_log_returns = currency_log_returns.mean() - sd_filter * sd_currency_log_returns
+                currency_returns_filtered = currency_returns[(currency_returns < ub_currency_returns) & (currency_returns > lb_currency_returns)]
+                currency_log_returns_filtered = currency_log_returns[(currency_log_returns < ub_currency_log_returns) & (currency_log_returns > lb_currency_log_returns)]
+                
+                # Calculating the realized volatility for the filtered returns and log returns
+                realized_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).std()
+                realized_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).std()
+                realized_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).std()
+                realized_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).std()
+                realized_vol_currency_log_1MROLL = currency_log_returns_filtered.rolling(window=21).std()
+                realized_vol_currency_log_3MROLL = currency_log_returns_filtered.rolling(window=63).std()
+                realized_vol_currency_log_6MROLL = currency_log_returns_filtered.rolling(window=126).std()
+                realized_vol_currency_log_12MROLL = currency_log_returns_filtered.rolling(window=252).std()
+                
+                # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
+                realized_vol_currency_1MROLL = realized_vol_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_currency_3MROLL = realized_vol_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_currency_6MROLL = realized_vol_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_currency_12MROLL = realized_vol_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_currency_log_1MROLL = realized_vol_currency_log_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_currency_log_3MROLL = realized_vol_currency_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_currency_log_6MROLL = realized_vol_currency_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_currency_log_12MROLL = realized_vol_currency_log_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                
+                # Storing the realized volatility in the class
+                self.realized_vol_currency_1MROLL = realized_vol_currency_1MROLL
+                self.realized_vol_currency_3MROLL = realized_vol_currency_3MROLL
+                self.realized_vol_currency_6MROLL = realized_vol_currency_6MROLL
+                self.realized_vol_currency_12MROLL = realized_vol_currency_12MROLL
+                self.realized_vol_currency_log_1MROLL = realized_vol_currency_log_1MROLL
+                self.realized_vol_currency_log_3MROLL = realized_vol_currency_log_3MROLL
+                self.realized_vol_currency_log_6MROLL = realized_vol_currency_log_6MROLL
+                self.realized_vol_currency_log_12MROLL = realized_vol_currency_log_12MROLL
+                
+                # Calculating the net realized volatility for the future
+                # We first transform the price to the base currency, then we calculate the returns
+                # Getting the price in the base currency
+                price_base_currency = self.roll_settle_theoretical['Roll value'] * self.currency_object.px_last.loc[self.roll_settle_theoretical.index]
+                price_base_currency = price_base_currency.dropna()
+                price_base_currency = price_base_currency[~price_base_currency.index.isna()]
+                price_base_currency = price_base_currency[~price_base_currency.index.isin([pd.NaT])]
+                price_base_currency = price_base_currency[~price_base_currency.index.duplicated(keep='first')]
+                price_base_currency = price_base_currency.reindex(self.roll_settle_theoretical.index, method='ffill')
+                
+                # Getting the returns and log returns
+                price_base_currency_returns = price_base_currency.pct_change()
+                price_base_currency_log_returns = np.log(price_base_currency / price_base_currency.shift(1))
+                
+                # Filtering the returns and log returns using the sd_filter (number of standard deviations from the mean)
+                sd_price_base_currency_returns = price_base_currency_returns.std()
+                sd_price_base_currency_log_returns = price_base_currency_log_returns.std()
+                ub_price_base_currency_returns = price_base_currency_returns.mean() + sd_filter * sd_price_base_currency_returns
+                lb_price_base_currency_returns = price_base_currency_returns.mean() - sd_filter * sd_price_base_currency_returns
+                ub_price_base_currency_log_returns = price_base_currency_log_returns.mean() + sd_filter * sd_price_base_currency_log_returns
+                lb_price_base_currency_log_returns = price_base_currency_log_returns.mean() - sd_filter * sd_price_base_currency_log_returns
+                price_base_currency_returns_filtered = price_base_currency_returns[(price_base_currency_returns < ub_price_base_currency_returns) & (price_base_currency_returns > lb_price_base_currency_returns)]
+                price_base_currency_log_returns_filtered = price_base_currency_log_returns[(price_base_currency_log_returns < ub_price_base_currency_log_returns) & (price_base_currency_log_returns > lb_price_base_currency_log_returns)]
+                
+                # Calculating the realized volatility for the filtered returns and log returns
+                realized_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).std()
+                realized_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).std()
+                realized_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).std()
+                realized_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).std()
+                realized_vol_price_base_currency_log_1MROLL = price_base_currency_log_returns_filtered.rolling(window=21).std()
+                realized_vol_price_base_currency_log_3MROLL = price_base_currency_log_returns_filtered.rolling(window=63).std()
+                realized_vol_price_base_currency_log_6MROLL = price_base_currency_log_returns_filtered.rolling(window=126).std()
+                realized_vol_price_base_currency_log_12MROLL = price_base_currency_log_returns_filtered.rolling(window=252).std()
+                
+                # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
+                realized_vol_price_base_currency_1MROLL = realized_vol_price_base_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_price_base_currency_3MROLL = realized_vol_price_base_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_price_base_currency_6MROLL = realized_vol_price_base_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_price_base_currency_12MROLL = realized_vol_price_base_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_price_base_currency_log_1MROLL = realized_vol_price_base_currency_log_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_price_base_currency_log_3MROLL = realized_vol_price_base_currency_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_price_base_currency_log_6MROLL = realized_vol_price_base_currency_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_vol_price_base_currency_log_12MROLL = realized_vol_price_base_currency_log_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                
+                # Storing the realized volatility in the class
+                self.realized_vol_price_base_currency_1MROLL = realized_vol_price_base_currency_1MROLL
+                self.realized_vol_price_base_currency_3MROLL = realized_vol_price_base_currency_3MROLL
+                self.realized_vol_price_base_currency_6MROLL = realized_vol_price_base_currency_6MROLL
+                self.realized_vol_price_base_currency_12MROLL = realized_vol_price_base_currency_12MROLL
+                self.realized_vol_price_base_currency_log_1MROLL = realized_vol_price_base_currency_log_1MROLL
+                self.realized_vol_price_base_currency_log_3MROLL = realized_vol_price_base_currency_log_3MROLL
+                self.realized_vol_price_base_currency_log_6MROLL = realized_vol_price_base_currency_log_6MROLL
+                self.realized_vol_price_base_currency_log_12MROLL = realized_vol_price_base_currency_log_12MROLL
             
         except ValueError:
             raise ValueError(f"Error in return_roll_settle: {self.name} - {self.type} - {self.currency}")
