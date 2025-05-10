@@ -240,6 +240,7 @@ class Contract:
         self.calendar = calendar
         
         try:
+            pass
             self.underlying = identify_future(name, type)
         except ValueError:
             raise ValueError(f"Contract {name} not found in any data.")
@@ -751,6 +752,24 @@ class Future:
             date_index = dates.get_loc(date)
             yesterday = dates[date_index - 1]
             
+            # Checking two things: Todays PX_SETTLE and yesterday PX_SETTLE
+            # We're checking that they are not NaN, not empty, and numeric. If today is NaN we will assign it to yesterday's value
+            if pd.isna(self.get_relevant_contract(date, date_delta, maturity_delta).PX_SETTLE.loc[date]):
+                try:
+                    self.get_relevant_contract(date, date_delta, maturity_delta).PX_SETTLE.loc[date] = self.get_relevant_contract(yesterday, date_delta, maturity_delta).PX_SETTLE.loc[yesterday]
+                except Exception as e:
+                    raise ValueError(f"Error getting the PX_SETTLE data for date {date}: {e}")
+            if pd.isna(self.get_relevant_contract(yesterday, date_delta, maturity_delta).PX_SETTLE.loc[yesterday]):
+                try:
+                    self.get_relevant_contract(yesterday, date_delta, maturity_delta).PX_SETTLE.loc[yesterday] = self.get_relevant_contract(date, date_delta, maturity_delta).PX_SETTLE.loc[date]
+                except Exception as e:
+                    raise ValueError(f"Error getting the PX_SETTLE data for date {yesterday}: {e}")
+            if pd.isna(self.get_relevant_contract(yesterday, date_delta, maturity_delta).PX_SETTLE.loc[date]):
+                try:
+                    self.get_relevant_contract(yesterday, date_delta, maturity_delta).PX_SETTLE.loc[date] = self.get_relevant_contract(yesterday, date_delta, maturity_delta).PX_SETTLE.loc[yesterday]
+                except Exception as e:
+                    raise ValueError(f"Error getting the PX_SETTLE data for date {yesterday}: {e}")
+            
             # Checking if we should roll:
             if self.is_relevant_maturity_date(date, date_delta, maturity_delta):
                 # Outgoing contract information - Marked to market to today
@@ -919,7 +938,9 @@ class Future:
                 # Calculating the net realized volatility for the future
                 # We first transform the price to the base currency, then we calculate the returns
                 # Getting the price in the base currency
-                price_base_currency = self.roll_settle_theoretical['Roll value'] * self.currency_object.px_last.loc[self.roll_settle_theoretical.index]
+                # Align indices before multiplying
+                fx_px_last_aligned = self.currency_object.px_last.reindex(self.roll_settle_theoretical.index, method='ffill')
+                price_base_currency = self.roll_settle_theoretical['Roll value'] * fx_px_last_aligned
                 price_base_currency = price_base_currency.dropna()
                 price_base_currency = price_base_currency[~price_base_currency.index.isna()]
                 price_base_currency = price_base_currency[~price_base_currency.index.isin([pd.NaT])]
@@ -969,6 +990,38 @@ class Future:
                 self.realized_vol_price_base_currency_log_3MROLL = realized_vol_price_base_currency_log_3MROLL
                 self.realized_vol_price_base_currency_log_6MROLL = realized_vol_price_base_currency_log_6MROLL
                 self.realized_vol_price_base_currency_log_12MROLL = realized_vol_price_base_currency_log_12MROLL
+            
+            # We check all the voatilities we have built
+            # It can never go to 0. If it does we have to do a forward fill
+            for vol in ['realized_vol_roll_1MROLL', 'realized_vol_roll_3MROLL', 'realized_vol_roll_6MROLL', 'realized_vol_roll_12MROLL', 'realized_vol_roll_log_1MROLL', 'realized_vol_roll_log_3MROLL', 'realized_vol_roll_log_6MROLL', 'realized_vol_roll_log_12MROLL']:
+                if getattr(self, vol).isna().sum() > 0:
+                    getattr(self, vol).fillna(method='ffill', inplace=True)
+                    
+                # Now any 0 values we have to set to the last value
+                if (getattr(self, vol) == 0).sum() > 0:
+                    getattr(self, vol).replace(0, np.nan, inplace=True)
+                    getattr(self, vol).fillna(method='ffill', inplace=True)
+            
+            # The same but now if the currency object is not None
+            if self.currency_object is not None:
+                for vol in ['realized_vol_currency_1MROLL', 'realized_vol_currency_3MROLL', 'realized_vol_currency_6MROLL', 'realized_vol_currency_12MROLL', 'realized_vol_currency_log_1MROLL', 'realized_vol_currency_log_3MROLL', 'realized_vol_currency_log_6MROLL', 'realized_vol_currency_log_12MROLL']:
+                    if getattr(self, vol).isna().sum() > 0:
+                        getattr(self, vol).fillna(method='ffill', inplace=True)
+                        
+                    # Now any 0 values we have to set to the last value
+                    if (getattr(self, vol) == 0).sum() > 0:
+                        getattr(self, vol).replace(0, np.nan, inplace=True)
+                        getattr(self, vol).fillna(method='ffill', inplace=True)
+                
+                # The same but now for the price base currency
+                for vol in ['realized_vol_price_base_currency_1MROLL', 'realized_vol_price_base_currency_3MROLL', 'realized_vol_price_base_currency_6MROLL', 'realized_vol_price_base_currency_12MROLL', 'realized_vol_price_base_currency_log_1MROLL', 'realized_vol_price_base_currency_log_3MROLL', 'realized_vol_price_base_currency_log_6MROLL', 'realized_vol_price_base_currency_log_12MROLL']:
+                    if getattr(self, vol).isna().sum() > 0:
+                        getattr(self, vol).fillna(method='ffill', inplace=True)
+                        
+                    # Now any 0 values we have to set to the last value
+                    if (getattr(self, vol) == 0).sum() > 0:
+                        getattr(self, vol).replace(0, np.nan, inplace=True)
+                        getattr(self, vol).fillna(method='ffill', inplace=True)
             
         except ValueError:
             raise ValueError(f"Error in return_roll_settle: {self.name} - {self.type} - {self.currency}")
@@ -1033,17 +1086,17 @@ class Future:
 
 class Strategy:
     """A class that represents a portfolio construction strategy using futures contracts."""
-    def __init__(self, name: str, futures: list, strategy_type: str, initial_investment: float = 1000, date_delta: int = 0, maturity_delta: int = 0, start_date: pd.Timestamp = None, end_date: pd.Timestamp = None, sd_filter: int = 5, fx_ts: pd.Series = None):
+    def __init__(self, name: str, futures: list, strategy_type: str, base_currency: str, initial_investment: float = 1000, date_delta: int = 0, maturity_delta: int = 0, start_date: pd.Timestamp = None, end_date: pd.Timestamp = None, sd_filter: int = 5):
         self.name = name
         self.futures = futures
         self.strategy_type = strategy_type
+        self.base_currency = base_currency
         self.initial_investment = initial_investment
         self.date_delta = date_delta
         self.maturity_delta = maturity_delta
         self.start_date = start_date
         self.end_date = end_date
         self.sd_filter = sd_filter
-        self.fx_ts = fx_ts
         
         self.multiple_currency = False
         self.multiple_asset_class = False     
@@ -1059,6 +1112,10 @@ class Strategy:
             raise TypeError("Strategy type must be a string.")
         if self.strategy_type not in SUPPORTED_STRATEGIES:
             raise ValueError(f"Strategy type {self.strategy_type} not supported. Supported types are: {list(SUPPORTED_STRATEGIES.keys())}.")
+        if not isinstance(self.base_currency, str):
+            raise TypeError("Base currency must be a string.")
+        if self.base_currency not in SUPPORTED_CURRENCIES:
+            raise ValueError(f"Base currency {self.base_currency} not supported. Supported currencies are: {list(SUPPORTED_CURRENCIES.keys())}.")
         if not isinstance(self.initial_investment, (int, float)):
             raise TypeError("Initial investment must be a number.")
         if not isinstance(self.date_delta, int):
@@ -1079,8 +1136,7 @@ class Strategy:
             raise TypeError("SD filter must be a positive integer.")
         if self.sd_filter < 0:
             raise ValueError("SD filter must be a positive integer.")
-        if not isinstance(self.fx_ts, (pd.Series, type(None))):
-            raise TypeError("FX time series must be a pandas Series or None.")
+        
         
         # Checking if within all the futures, there are multiple currencies and multiple asset classes
         currencies = set()
@@ -1095,10 +1151,6 @@ class Strategy:
         if len(asset_classes) > 1:
             self.multiple_asset_class = True
             
-        # If multiple currencies, we need to check if the fx_ts is provided, if not, we raise an error
-        if self.multiple_currency and self.fx_ts is None:
-            raise ValueError("Multiple currencies detected, please provide a FX time series.")
-        
         # Controlling start_date and end_date
         first_common_date = [future.get_first_data_date() for future in self.futures]
         last_common_date = [future.get_last_data_date() for future in self.futures]
@@ -1226,47 +1278,91 @@ class Strategy:
                 # Which is already calculated in the future class
                 # But it has to match the estimation window
                 realized_vol = None
-                try:
-                    if estimation_window == '1M':
-                        realized_vol = future.realized_vol_roll_1MROLL.loc[date]
-                        if realized_vol == 0:
-                            # We try to get the former value
-                            date_index = future.realized_vol_roll_1MROLL.index
-                            yesterday = date_index[date_index.get_loc(date) - 1]
-                            realized_vol = future.realized_vol_roll_1MROLL.loc[yesterday]
-                    elif estimation_window == '3M':
-                        realized_vol = future.realized_vol_roll_3MROLL.loc[date]
-                        if realized_vol == 0:
-                            # We try to get the former value
-                            date_index = future.realized_vol_roll_3MROLL.index
-                            yesterday = date_index[date_index.get_loc(date) - 1]
-                            realized_vol = future.realized_vol_roll_3MROLL.loc[yesterday]
-                    elif estimation_window == '6M':
-                        realized_vol = future.realized_vol_roll_6MROLL.loc[date]
-                        if realized_vol == 0:
-                            # We try to get the former value
-                            date_index = future.realized_vol_roll_6MROLL.index
-                            yesterday = date_index[date_index.get_loc(date) - 1]
-                            realized_vol = future.realized_vol_roll_6MROLL.loc[yesterday]
-                    elif estimation_window == '12M':
-                        realized_vol = future.realized_vol_roll_12MROLL.loc[date]
-                        if realized_vol == 0:
-                            # We try to get the former value
-                            date_index = future.realized_vol_roll_12MROLL.index
-                            yesterday = date_index[date_index.get_loc(date) - 1]
-                            realized_vol = future.realized_vol_roll_12MROLL.loc[yesterday]
-                except KeyError:
-                    raise KeyError(f"Realized volatility for future {future.name} not available for date {date}.")
-                if realized_vol is None:
-                    raise ValueError(f"Realized volatility for future {future.name} is None for date {date}.")
-                if realized_vol == 0:
-                    raise ValueError(f"Realized volatility for future {future.name} is 0 for date {date}.")
-                if pd.isna(realized_vol):
-                    raise ValueError(f"Realized volatility for future {future.name} is NaN for date {date}.")
-                # The weight is the inverse of the realized volatility squared
-                weights[future.name] = 1 / (realized_vol ** 2)
-                if weights[future.name] == np.nan:
-                    raise ValueError(f"Weight for future {future.name} is NaN.")
+                if future.currency_object is None:
+                    try:
+                        if estimation_window == '1M':
+                            realized_vol = future.realized_vol_roll_1MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_roll_1MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_roll_1MROLL.loc[yesterday]
+                        elif estimation_window == '3M':
+                            realized_vol = future.realized_vol_roll_3MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_roll_3MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_roll_3MROLL.loc[yesterday]
+                        elif estimation_window == '6M':
+                            realized_vol = future.realized_vol_roll_6MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_roll_6MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_roll_6MROLL.loc[yesterday]
+                        elif estimation_window == '12M':
+                            realized_vol = future.realized_vol_roll_12MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_roll_12MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_roll_12MROLL.loc[yesterday]
+                    except KeyError:
+                        raise KeyError(f"Realized volatility for future {future.name} not available for date {date}.")
+                    if realized_vol is None:
+                        raise ValueError(f"Realized volatility for future {future.name} is None for date {date}.")
+                    if realized_vol == 0:
+                        raise ValueError(f"Realized volatility for future {future.name} is 0 for date {date}.")
+                    if pd.isna(realized_vol):
+                        raise ValueError(f"Realized volatility for future {future.name} is NaN for date {date}.")
+                    # The weight is the inverse of the realized volatility squared
+                    weights[future.name] = 1 / (realized_vol ** 2)
+                    if weights[future.name] == np.nan:
+                        raise ValueError(f"Weight for future {future.name} is NaN.")
+                else: # We will have to take the base currency vol and not the normal realized vol
+                    try:
+                        if estimation_window == '1M':
+                            realized_vol = future.realized_vol_currency_1MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_currency_1MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_currency_1MROLL.loc[yesterday]
+                        elif estimation_window == '3M':
+                            realized_vol = future.realized_vol_currency_3MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_currency_3MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_currency_3MROLL.loc[yesterday]
+                        elif estimation_window == '6M':
+                            realized_vol = future.realized_vol_currency_6MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_currency_6MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_currency_6MROLL.loc[yesterday]
+                        elif estimation_window == '12M':
+                            realized_vol = future.realized_vol_currency_12MROLL.loc[date]
+                            if realized_vol == 0:
+                                # We try to get the former value
+                                date_index = future.realized_vol_currency_12MROLL.index
+                                yesterday = date_index[date_index.get_loc(date) - 1]
+                                realized_vol = future.realized_vol_currency_12MROLL.loc[yesterday]
+                    except KeyError:
+                        raise KeyError(f"Realized volatility for future {future.name} not available for date {date}.")
+                    if realized_vol is None:
+                        raise ValueError(f"Realized volatility for future {future.name} is None for date {date}.")
+                    if realized_vol == 0:
+                        raise ValueError(f"Realized volatility for future {future.name} is 0 for date {date}.")
+                    if pd.isna(realized_vol):
+                        raise ValueError(f"Realized volatility for future {future.name} is NaN for date {date}.")
+                    # The weight is
+                    # the inverse of the realized volatility squared
+                    weights[future.name] = 1 / (realized_vol ** 2)
+                    if weights[future.name] == np.nan:
+                        raise ValueError(f"Weight for future {future.name} is NaN.")
             # Normalizing the weights
             # total_weight = sum(weights.values())
             #for future in self.futures:
@@ -1296,6 +1392,15 @@ class Strategy:
             for future in self.futures:
                 weights[future.name] = weights[future.name] / total_weight
 
+        total_weight = 0
+        for future in self.futures:
+            if weights[future.name] is None:
+                raise ValueError(f"Weight for future {future.name} is None.")
+            if weights[future.name] == np.nan:
+                raise ValueError(f"Weight for future {future.name} is NaN.")
+            total_weight += weights[future.name]
+        if not np.isclose(total_weight, 1.0, atol=1e-8):
+            raise ValueError(f"Weights do not sum to 1. Total weight: {total_weight}.")
         return weights
     
     # @njit(cache=True)
@@ -1377,6 +1482,25 @@ class Strategy:
         rebalancing_dates = rebalancing_dates.sort_values()
         rebalancing_dates = pd.DatetimeIndex(rebalancing_dates)
         
+        # If multiple currencies we will bring the currency object of one of the foreign currency futures
+        # TODO: If this is developed further, we need to do something more complex to accound for multiple FX rates
+        if self.multiple_currency:
+            # We will take the first future that has a currency object
+            for future in self.futures:
+                if future.currency_object is not None:
+                    currency_object = future.currency_object
+                    
+                    # We will filter the the dates of the currency object to match our dates
+                    # And if there's some NaN values we will forward fill them
+                    currency_object.px_last = currency_object.px_last.reindex(dates, method='ffill')
+                    currency_object.px_bid = currency_object.px_bid.reindex(dates, method='ffill')
+                    currency_object.px_ask = currency_object.px_ask.reindex(dates, method='ffill')
+                
+                    # We check if the direction of the currency is correct
+                    if currency_object.quote_currency != 'EUR':
+                        raise ValueError(f"Currency object {currency_object.name} has a quote currency different from EUR.")   
+                    break             
+        
         # Creating an object to store the data
         strategy_simulation = {}
         strategy_simulation['Rebalancing calendar'] = rebalancing_dates
@@ -1430,10 +1554,39 @@ class Strategy:
             strategy_simulation[future.name].loc[start_date, 'Transaction (BOOLEAN)'] = True
             strategy_simulation[future.name].loc[start_date, 'Rolling (BOOLEAN)'] = False
             strategy_simulation[future.name].loc[start_date, 'Rebalancing (BOOLEAN)'] = True
+            if future.currency_object is not None:
+                # Try with start_date FX first
+                try:
+                    fx_value = currency_object.px_last.loc[start_date]
+                except KeyError:
+                    fx_value = np.nan
+                try:
+                    px_settle = future.get_relevant_contract(start_date, date_delta, maturity_delta).PX_SETTLE.loc[start_date]
+                except KeyError:
+                    px_settle = np.nan
+                contract_px_settle = px_settle * fx_value
+                # If NaN, try next days for FX
+                if pd.isna(contract_px_settle):
+                    # We will backward fill the FX value and PX_SETTLE until we find a value for both
+                    for i in range(1, 10):
+                        try:
+                            fx_value = currency_object.px_last.loc[dates[i-1]]
+                            px_settle = future.get_relevant_contract(dates[i-1], date_delta, maturity_delta).PX_SETTLE.loc[dates[i-1]]
+                            contract_px_settle = px_settle * fx_value
+                            if not pd.isna(contract_px_settle):
+                                break
+                        except KeyError:
+                            raise KeyError(f"Contract {future.name} not available for date {start_date}.")
+                    
+                strategy_simulation[future.name].loc[start_date, 'Contract PX_SETTLE'] = contract_px_settle
+            else:
+                strategy_simulation[future.name].loc[start_date, 'Contract PX_SETTLE'] = future.get_relevant_contract(start_date, date_delta, maturity_delta).PX_SETTLE.loc[start_date]
             strategy_simulation[future.name].loc[start_date, 'Active contract'] = future.get_relevant_contract(start_date, date_delta, maturity_delta).name
-            strategy_simulation[future.name].loc[start_date, 'Number of contracts'] = initial_investment * weights[future.name] / future.get_relevant_contract(start_date, date_delta, maturity_delta).PX_SETTLE.loc[start_date]
-            strategy_simulation[future.name].loc[start_date, 'Contract PX_SETTLE'] = future.get_relevant_contract(start_date, date_delta, maturity_delta).PX_SETTLE.loc[start_date]
-            strategy_simulation[future.name].loc[start_date, 'Transaction'] = f'Buy: {future.get_relevant_contract(start_date, date_delta, maturity_delta).name} at {future.get_relevant_contract(start_date, date_delta, maturity_delta).PX_SETTLE.loc[start_date]:.2f}, totalling {initial_investment * weights[future.name]:.2f} {future.get_relevant_contract(start_date, date_delta, maturity_delta).currency}'
+            strategy_simulation[future.name].loc[start_date, 'Number of contracts'] = initial_investment * weights[future.name] / strategy_simulation[future.name].loc[start_date, 'Contract PX_SETTLE']
+            strategy_simulation[future.name].loc[start_date, 'Transaction'] = f'Buy: {future.get_relevant_contract(start_date, date_delta, maturity_delta).name} at {future.get_relevant_contract(start_date, date_delta, maturity_delta).PX_SETTLE.loc[start_date]:.2f}  {future.get_relevant_contract(start_date, date_delta, maturity_delta).currency}, totalling {initial_investment * weights[future.name]:.2f} EUR'
+            
+            # Checking if nothing is NaN
+            
 
             
         # Looping through the dates
@@ -1452,7 +1605,10 @@ class Strategy:
                 # Getting the active contract at the close of the previous day
                 active_contract = future.get_relevant_contract(yesterday, date_delta, maturity_delta)
                 active_contract_no = strategy_simulation[future.name].loc[yesterday, 'Number of contracts']
-                active_contract_px = active_contract.PX_SETTLE.loc[date]
+                if future.currency_object is not None:
+                    active_contract_px = active_contract.PX_SETTLE.loc[date] * currency_object.px_last.loc[date]
+                else:
+                    active_contract_px = active_contract.PX_SETTLE.loc[date]
                 active_contract_value = active_contract_no * active_contract_px
                 portfolio_value += active_contract_value
             
@@ -1467,7 +1623,10 @@ class Strategy:
                 # Valuing contract: Asuming that yesterday's contract is the same as today's contract
                 active_contract = future.get_relevant_contract(yesterday, date_delta, maturity_delta)
                 active_contract_no = strategy_simulation[future.name].loc[yesterday, 'Number of contracts']
-                active_contract_px = active_contract.PX_SETTLE.loc[date]
+                if future.currency_object is not None:
+                    active_contract_px = active_contract.PX_SETTLE.loc[date] * currency_object.px_last.loc[date]
+                else:
+                    active_contract_px = active_contract.PX_SETTLE.loc[date]
                 active_contract_value = active_contract_no * active_contract_px
                 strategy_simulation[future.name].loc[date, 'Position value'] = active_contract_value
                 strategy_simulation[future.name].loc[date, 'Transaction (BOOLEAN)'] = False
@@ -1482,7 +1641,10 @@ class Strategy:
                 if future.is_relevant_maturity_date(date, date_delta, maturity_delta):
                     # We get the incoming contract (if is_relevant_maturity_date is True, it means that today we need to roll)
                     incoming_contract = future.get_relevant_contract(date, date_delta, maturity_delta)
-                    incoming_contract_px = incoming_contract.PX_SETTLE.loc[date]
+                    if future.currency_object is not None:
+                        incoming_contract_px = incoming_contract.PX_SETTLE.loc[date] * currency_object.px_last.loc[date]
+                    else:
+                        incoming_contract_px = incoming_contract.PX_SETTLE.loc[date]
                     incoming_contract_no = strategy_simulation[future.name].loc[date, 'Position value'] / incoming_contract_px
                     strategy_simulation[future.name].loc[date, 'Active contract'] = incoming_contract.name
                     strategy_simulation[future.name].loc[date, 'Number of contracts'] = incoming_contract_no
@@ -1490,7 +1652,7 @@ class Strategy:
                     strategy_simulation[future.name].loc[date, 'Transaction (BOOLEAN)'] = True
                     strategy_simulation[future.name].loc[date, 'Rolling (BOOLEAN)'] = True
                     strategy_simulation[future.name].loc[date, 'Rebalancing (BOOLEAN)'] = False
-                    strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {incoming_contract.name} at {incoming_contract_px:.2f}, totalling {strategy_simulation[future.name].loc[date, "Position value"]:.2f} {incoming_contract.currency}, Sell: {active_contract.name} at {active_contract_px:.2f}, totalling {strategy_simulation[future.name].loc[yesterday, "Position value"]:.2f} {incoming_contract.currency}'
+                    strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {incoming_contract.name} at {incoming_contract_px:.2f} EUR, totalling {strategy_simulation[future.name].loc[date, "Position value"]:.2f} EUR, Sell: {active_contract.name} at {active_contract_px:.2f} EUR, totalling {strategy_simulation[future.name].loc[yesterday, "Position value"]:.2f} EUR'
                     
                     # Updating booleans in the portfolio
                     strategy_simulation['Portfolio'].loc[date, 'Transaction (BOOLEAN)'] = True
@@ -1514,14 +1676,20 @@ class Strategy:
                     # Getting the active contract
                     old_active_contract = future.get_relevant_contract(yesterday, date_delta, maturity_delta)
                     active_contract = future.get_relevant_contract(date, date_delta, maturity_delta)
-                    active_contract_px = active_contract.PX_SETTLE.loc[date]
+                    if future.currency_object is not None:
+                        active_contract_px = active_contract.PX_SETTLE.loc[date] * currency_object.px_last.loc[date]
+                    else:
+                        active_contract_px = active_contract.PX_SETTLE.loc[date]
                     active_contract_no = strategy_simulation[future.name].loc[date, 'Number of contracts']
                     active_contract_value = active_contract_no * active_contract_px
                     
                     # Getting the new number of contracts
                     old_active_contract_no = strategy_simulation[future.name].loc[date, 'Number of contracts']
                     new_active_contract_no = strategy_simulation['Portfolio'].loc[date, 'Portfolio value'] * weights[future.name] / active_contract_px
-                    old_active_contract_value = old_active_contract_no * old_active_contract.PX_SETTLE.loc[date]
+                    if future.currency_object is not None:
+                        old_active_contract_value = old_active_contract_no * old_active_contract.PX_SETTLE.loc[date] * currency_object.px_last.loc[date]
+                    else:
+                        old_active_contract_value = old_active_contract_no * old_active_contract.PX_SETTLE.loc[date]
                     new_active_contract_value = new_active_contract_no * active_contract_px
                     
                     # Updating the number of contracts
@@ -1538,7 +1706,7 @@ class Strategy:
                     # Except if it was also a roll date, in which case we sell all of the old contract and buy all of the new contract
                     if old_active_contract != active_contract:
                         # This means that we are rolling but also rebalancing
-                        strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {active_contract.name} at {active_contract_px:.2f}, totalling {strategy_simulation['Portfolio'].loc[date, 'Portfolio value'] * weights[future.name]:.2f} {active_contract.currency}, Sell: {old_active_contract.name} at {active_contract_px:.2f}, totalling {old_active_contract_value:.2f} {active_contract.currency}'
+                        strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {active_contract.name} at {active_contract_px:.2f}, totalling {strategy_simulation['Portfolio'].loc[date, 'Portfolio value'] * weights[future.name]:.2f} EUR, Sell: {old_active_contract.name} at {active_contract_px:.2f}, totalling {old_active_contract_value:.2f} EUR'
                         strategy_simulation[future.name].loc[date, 'Rolling (BOOLEAN)'] = True
                         strategy_simulation['Portfolio'].loc[date, 'Rolling (BOOLEAN)'] = True
                     else:
@@ -1547,19 +1715,57 @@ class Strategy:
                             # Amount to buy
                             amount_to_buy = new_active_contract_value - active_contract_value
                             contracts_to_buy = amount_to_buy / active_contract_px
-                            strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {active_contract.name} at {active_contract_px:.2f}, totalling {amount_to_buy:.2f} {active_contract.currency}'
+                            strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {active_contract.name} at {active_contract_px:.2f}, totalling {amount_to_buy:.2f} EUR'
                         else:
                             # Amount to sell
                             amount_to_sell = active_contract_value - new_active_contract_value
                             contracts_to_sell = amount_to_sell / active_contract_px
-                            strategy_simulation[future.name].loc[date, 'Transaction'] = f'Sell: {active_contract.name} at {active_contract_px:.2f}, totalling {amount_to_sell:.2f} {active_contract.currency}'
+                            strategy_simulation[future.name].loc[date, 'Transaction'] = f'Sell: {active_contract.name} at {active_contract_px:.2f}, totalling {amount_to_sell:.2f} EUR'
                     
-                    strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {active_contract.name} at {active_contract_px:.2f}, totalling {strategy_simulation['Portfolio'].loc[date, 'Portfolio value'] * weights[future.name]:.2f} {active_contract.currency}, Sell: {active_contract.name} at {active_contract_px:.2f}, totalling {active_contract_value:.2f} {active_contract.currency}'
+                    strategy_simulation[future.name].loc[date, 'Transaction'] = f'Buy: {active_contract.name} at {active_contract_px:.2f}, totalling {strategy_simulation['Portfolio'].loc[date, 'Portfolio value'] * weights[future.name]:.2f} EUR, Sell: {active_contract.name} at {active_contract_px:.2f}, totalling {active_contract_value:.2f} EUR'
                     
                 # Updating booleans in the portfolio
                 strategy_simulation['Portfolio'].loc[date, 'Transaction (BOOLEAN)'] = True
                 strategy_simulation['Portfolio'].loc[date, 'Rebalancing (BOOLEAN)'] = True
 
+            # If something has gone wrong, by producing a NaN value
+            # We will try to do a forward fill
+            revalue = False
+            for future in self.futures:
+                # If any of these have occurred we will need to revalue the portfolio so that the weights sum to 1
+                # Now checking if its nan
+                if pd.isna(strategy_simulation[future.name].loc[date, 'Position value']):
+                    print(f'Future {future.name} has a NaN value for date {date}. A forward fill will be applied.')
+                    strategy_simulation[future.name].loc[date, 'Position value'] = strategy_simulation[future.name].loc[yesterday, 'Position value']
+                    revalue = True
+                if pd.isna(strategy_simulation[future.name].loc[date, 'Number of contracts']):
+                    print(f'Future {future.name} has a NaN value for date {date}. A forward fill will be applied.')
+                    strategy_simulation[future.name].loc[date, 'Number of contracts'] = strategy_simulation[future.name].loc[yesterday, 'Number of contracts']
+                    revalue = True
+                if pd.isna(strategy_simulation[future.name].loc[date, 'Contract PX_SETTLE']):
+                    print(f'Future {future.name} has a NaN value for date {date}. A forward fill will be applied.')
+                    strategy_simulation[future.name].loc[date, 'Contract PX_SETTLE'] = strategy_simulation[future.name].loc[yesterday, 'Contract PX_SETTLE']
+                    revalue = True
+            
+            # If we need to revalue the portfolio, we will do it here
+            if revalue:
+                # Revaluing the portfolio
+                portfolio_value = 0
+                for future in self.futures:
+                    # Getting the active contract at the close of the previous day
+                    active_contract = future.get_relevant_contract(yesterday, date_delta, maturity_delta)
+                    active_contract_no = strategy_simulation[future.name].loc[yesterday, 'Number of contracts']
+                    if future.currency_object is not None:
+                        active_contract_px = active_contract.PX_SETTLE.loc[date] * currency_object.px_last.loc[date]
+                    else:
+                        active_contract_px = active_contract.PX_SETTLE.loc[date]
+                    active_contract_value = active_contract_no * active_contract_px
+                    portfolio_value += active_contract_value
+                
+                # Updating the portfolio value. As of now, no transaction has been made
+                strategy_simulation['Portfolio'].loc[date, 'Portfolio value'] = portfolio_value
+                
+            
             # Updating the weights
             for future in self.futures:
                 try:
@@ -1567,4 +1773,14 @@ class Strategy:
                 except ZeroDivisionError:
                     strategy_simulation['Weights'].loc[date, future.name] = None
             
+            # Checking if the weights sum to 1
+            total_weight = 0
+            for future in self.futures:
+                if strategy_simulation['Weights'].loc[date, future.name] is None:
+                    raise ValueError(f"Weight for future {future.name} is None.")
+                if strategy_simulation['Weights'].loc[date, future.name] == np.nan:
+                    raise ValueError(f"Weight for future {future.name} is NaN.")
+                total_weight += strategy_simulation['Weights'].loc[date, future.name]
+            if not np.isclose(total_weight, 1.0, atol=1e-8):
+                raise ValueError(f"Weights do not sum to 1 at date {date}. Total weight: {total_weight}.")
         return strategy_simulation
