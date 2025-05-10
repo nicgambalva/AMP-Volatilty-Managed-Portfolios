@@ -19,6 +19,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from arch import arch_model
 from numba import njit
 
 # ----------- DICTIONARIES -----------
@@ -224,11 +225,53 @@ def plot_weights(weights_df, title='Weights overtime', figsize=(15, 10), dpi=300
     plt.tight_layout()
     plt.show()
 
+def downside_volatility(returns: pd.Series) -> float:
+    """
+    Calculate downside volatility (semi-deviation)
+    """
+    if not isinstance(returns, pd.Series):
+        raise ValueError("Returns must be a pandas Series.")
+    
+    # Replace positive returns with 0
+    modified_returns = returns.copy()
+    modified_returns[modified_returns > 0] = 0
+    
+    return np.sqrt(np.mean(modified_returns ** 2))
+
+def garch(window_returns, foreast_horizon=1 ,p=1 ,q=1):
+    """
+    Apply GARCH(p,q) model to a rolling window of returns and forecast volatility.
+    Designed to be used with pd.DataFrame()
+    """
+    # Skip if window has NaN values (incomplete window)
+    if window_returns.isna().any():
+        return np.nan
+    
+    try:
+        # Fit GARCH model
+        model = arch_model(window_returns, vol='Garch', p=p, q=q)
+        fitted_model = model.fit(disp='off')
+        
+        # Forecast specified horizon ahead
+        forecast = fitted_model.forecast(horizon=foreast_horizon)
+        
+        # Return the full forecast or just the first step
+        if foreast_horizon == 1:
+            return forecast.variance.values[-1, 0]
+        else:
+            return forecast.variance.values[-1, :]
+    
+    except Exception as e:
+        print(f"Error in GARCH fitting: {e}")
+        return np.nan
+
 # ----------- CLASSES -----------
 
 class Contract:
-    """A class that represents a particular futures contract.
-    It can handle both index and metal futures (with the potential to add more in the future). """
+    """
+    A class that represents a particular futures contract.
+    It can handle both index and metal futures (with the potential to add more in the future). 
+    """
     def __init__(self, name: str, type: str, currency: str, calendar: dict, px_settle: pd.Series = None, px_bid: pd.Series = None, px_ask: pd.Series = None, underlying_data: pd.Series = None):
         self.name = name
         self.type = type
@@ -390,7 +433,6 @@ class Currency:
     def __hash__(self):
         return hash(self.name)
 
-
 class Future:
     """A class that represents a collection of futures contracts with the same underlying asset.
     It can handle both index and metal futures (with the potential to add more in the future)."""
@@ -429,6 +471,16 @@ class Future:
         self.realized_vol_undr_log_3MROLL = None
         self.realized_vol_undr_log_6MROLL = None
         self.realized_vol_undr_log_12MROLL = None
+
+        self.realized_downside_vol_undr_1MROLL = None
+        self.realized_downside_vol_undr_3MROLL = None
+        self.realized_downside_vol_undr_6MROLL = None
+        self.realized_downside_vol_undr_12MROLL = None
+
+        self.garch_volatility_1MROLL = None
+        self.garch_volatility_3MROLL = None
+        self.garch_volatility_6MROLL = None
+        self.garch_volatility_12MROLL = None
         
         self.currency_object = currency_object
         if self.currency_object is not None:
@@ -806,6 +858,7 @@ class Future:
                 roll_settle_theoretical.loc[date, 'Contract PX_SETTLE'] = active_contract.PX_SETTLE.loc[date]
         
         return roll_settle_theoretical
+
     
     def build_theoretical_roll_settle(self, initial_investment: float = 1000, date_delta: int = 0, maturity_delta: int = 0, start_date: pd.Timestamp = None, end_date: pd.Timestamp = None, sd_filter: int = 5):
         """
@@ -851,12 +904,28 @@ class Future:
             realized_vol_roll_log_3MROLL = log_returns_filtered.rolling(window=63).std()
             realized_vol_roll_log_6MROLL = log_returns_filtered.rolling(window=126).std()
             realized_vol_roll_log_12MROLL = log_returns_filtered.rolling(window=252).std()
-            
+
+            # Calculating downside realized volatility for filtered returns
+            realized_downside_vol_roll_1MROLL = returns_filtered.rolling(window=21).apply(lambda x: downside_volatility(x), raw=False)
+            realized_downside_vol_roll_3MROLL = returns_filtered.rolling(window=63).apply(lambda x: downside_volatility(x), raw=False)
+            realized_downside_vol_roll_6MROLL = returns_filtered.rolling(window=126).apply(lambda x: downside_volatility(x), raw=False)
+            realized_downside_vol_roll_12MROLL = returns_filtered.rolling(window=252).apply(lambda x: downside_volatility(x), raw=False)
+
+            # Calculating garch volatility
+            garch_volatility_1MROLL = returns_filtered.rolling(window=21).apply(lambda x: garch(x), raw=False)
+            garch_volatility_3MROLL = returns_filtered.rolling(window=63).apply(lambda x: garch(x), raw=False)
+            garch_volatility_6MROLL = returns_filtered.rolling(window=126).apply(lambda x: garch(x), raw=False)
+            garch_volatility_12MROLL = returns_filtered.rolling(window=252).apply(lambda x: garch(x), raw=False)
+                        
             # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
             realized_vol_roll_1MROLL = realized_vol_roll_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
             realized_vol_roll_3MROLL = realized_vol_roll_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
             realized_vol_roll_6MROLL = realized_vol_roll_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
             realized_vol_roll_12MROLL = realized_vol_roll_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+            garch_volatility_1MROLL = garch_volatility_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+            garch_volatility_3MROLL = garch_volatility_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+            garch_volatility_6MROLL = garch_volatility_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+            garch_volatility_12MROLL = garch_volatility_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
             realized_vol_roll_log_1MROLL = realized_vol_roll_log_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
             realized_vol_roll_log_3MROLL = realized_vol_roll_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
             realized_vol_roll_log_6MROLL = realized_vol_roll_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
@@ -871,6 +940,14 @@ class Future:
             self.realized_vol_roll_log_3MROLL = realized_vol_roll_log_3MROLL
             self.realized_vol_roll_log_6MROLL = realized_vol_roll_log_6MROLL
             self.realized_vol_roll_log_12MROLL = realized_vol_roll_log_12MROLL
+            self.realized_downside_vol_roll_1MROLL = realized_downside_vol_roll_1MROLL
+            self.realized_downside_vol_roll_3MROLL = realized_downside_vol_roll_3MROLL
+            self.realized_downside_vol_roll_6MROLL = realized_downside_vol_roll_6MROLL
+            self.realized_downside_vol_roll_12MROLL = realized_downside_vol_roll_12MROLL
+            self.garch_volatility_1MROLL = garch_volatility_1MROLL
+            self.garch_volatility_3MROLL = garch_volatility_3MROLL
+            self.garch_volatility_6MROLL = garch_volatility_6MROLL
+            self.garch_volatility_12MROLL = garch_volatility_12MROLL
         
             # If the currency object is not None, we will also build the realized volatility for the fx rate returns
             # And the net realized volatility for the future (we first transform the price to the base currency, then we calculate the returns)
@@ -914,6 +991,18 @@ class Future:
                 realized_vol_currency_log_3MROLL = currency_log_returns_filtered.rolling(window=63).std()
                 realized_vol_currency_log_6MROLL = currency_log_returns_filtered.rolling(window=126).std()
                 realized_vol_currency_log_12MROLL = currency_log_returns_filtered.rolling(window=252).std()
+
+                # Downside realized volatility for filtered returns
+                realized_downside_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility(x), raw=False)
+
+                # GARCH Volatility Estimation
+                garch_volatility_currency_1MROLL = currency_returns_filtered.rolling(window=21).apply(lambda x: garch(x), raw=False)
+                garch_volatility_currency_3MROLL = currency_returns_filtered.rolling(window=63).apply(lambda x: garch(x), raw=False)
+                garch_volatility_currency_6MROLL = currency_returns_filtered.rolling(window=126).apply(lambda x: garch(x), raw=False)
+                garch_volatility_currency_12MROLL = currency_returns_filtered.rolling(window=252).apply(lambda x: garch(x), raw=False)
                 
                 # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
                 realized_vol_currency_1MROLL = realized_vol_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
@@ -924,6 +1013,14 @@ class Future:
                 realized_vol_currency_log_3MROLL = realized_vol_currency_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_currency_log_6MROLL = realized_vol_currency_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_currency_log_12MROLL = realized_vol_currency_log_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                garch_volatility_currency_1MROLL = garch_volatility_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                garch_volatility_currency_3MROLL = garch_volatility_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                garch_volatility_currency_6MROLL = garch_volatility_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                garch_volatility_currency_12MROLL= garch_volatility_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_currency_1MROLL = realized_downside_vol_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_currency_3MROLL = realized_downside_vol_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_currency_6MROLL = realized_downside_vol_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_currency_12MROLL = realized_downside_vol_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 
                 # Storing the realized volatility in the class
                 self.realized_vol_currency_1MROLL = realized_vol_currency_1MROLL
@@ -934,6 +1031,15 @@ class Future:
                 self.realized_vol_currency_log_3MROLL = realized_vol_currency_log_3MROLL
                 self.realized_vol_currency_log_6MROLL = realized_vol_currency_log_6MROLL
                 self.realized_vol_currency_log_12MROLL = realized_vol_currency_log_12MROLL
+                self.realized_downside_vol_currency_1MROLL = realized_downside_vol_currency_1MROLL
+                self.realized_downside_vol_currency_3MROLL = realized_downside_vol_currency_3MROLL
+                self.realized_downside_vol_currency_6MROLL = realized_downside_vol_currency_6MROLL
+                self.realized_downside_vol_currency_12MROLL = realized_downside_vol_currency_12MROLL
+                self.garch_volatility_currency_1MROLL = garch_volatility_currency_1MROLL
+                self.garch_volatility_currency_3MROLL = garch_volatility_currency_3MROLL
+                self.garch_volatility_currency_6MROLL = garch_volatility_currency_6MROLL
+                self.garch_volatility_currency_12MROLL = garch_volatility_currency_12MROLL
+
                 
                 # Calculating the net realized volatility for the future
                 # We first transform the price to the base currency, then we calculate the returns
@@ -970,12 +1076,22 @@ class Future:
                 realized_vol_price_base_currency_log_3MROLL = price_base_currency_log_returns_filtered.rolling(window=63).std()
                 realized_vol_price_base_currency_log_6MROLL = price_base_currency_log_returns_filtered.rolling(window=126).std()
                 realized_vol_price_base_currency_log_12MROLL = price_base_currency_log_returns_filtered.rolling(window=252).std()
+
+                # Downside realized volatility for filtered returns
+                realized_downside_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility(x), raw=False)
                 
                 # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
                 realized_vol_price_base_currency_1MROLL = realized_vol_price_base_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_price_base_currency_3MROLL = realized_vol_price_base_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_price_base_currency_6MROLL = realized_vol_price_base_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_price_base_currency_12MROLL = realized_vol_price_base_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_price_base_currency_1MROLL = realized_downside_vol_price_base_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_price_base_currency_3MROLL = realized_downside_vol_price_base_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_price_base_currency_6MROLL = realized_downside_vol_price_base_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
+                realized_downside_vol_price_base_currency_12MROLL = realized_downside_vol_price_base_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_price_base_currency_log_1MROLL = realized_vol_price_base_currency_log_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_price_base_currency_log_3MROLL = realized_vol_price_base_currency_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
                 realized_vol_price_base_currency_log_6MROLL = realized_vol_price_base_currency_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
@@ -990,6 +1106,10 @@ class Future:
                 self.realized_vol_price_base_currency_log_3MROLL = realized_vol_price_base_currency_log_3MROLL
                 self.realized_vol_price_base_currency_log_6MROLL = realized_vol_price_base_currency_log_6MROLL
                 self.realized_vol_price_base_currency_log_12MROLL = realized_vol_price_base_currency_log_12MROLL
+                self.realized_downside_vol_price_base_currency_1MROLL = realized_downside_vol_price_base_currency_1MROLL
+                self.realized_downside_vol_price_base_currency_3MROLL = realized_downside_vol_price_base_currency_3MROLL
+                self.realized_downside_vol_price_base_currency_6MROLL = realized_downside_vol_price_base_currency_6MROLL
+                self.realized_downside_vol_price_base_currency_12MROLL = realized_downside_vol_price_base_currency_12MROLL
             
             # We check all the voatilities we have built
             # It can never go to 0. If it does we have to do a forward fill
