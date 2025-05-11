@@ -21,6 +21,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from arch import arch_model
 from numba import njit
+from joblib import Parallel, delayed
 
 # ----------- DICTIONARIES -----------
 
@@ -238,6 +239,19 @@ def downside_volatility(returns: pd.Series) -> float:
     
     return np.sqrt(np.mean(modified_returns ** 2))
 
+@njit
+def downside_volatility_numba(returns: np.ndarray) -> float:
+    """
+    Calculate downside volatility (semi-deviation) using Numba for performance
+    """
+    if not isinstance(returns, np.ndarray):
+        raise ValueError("Returns must be a numpy array.")
+    
+    # Replace positive returns with 0
+    modified_returns = np.where(returns > 0, 0, returns)
+    return np.sqrt(np.mean(modified_returns ** 2))
+
+
 def garch(window_returns, foreast_horizon=1 ,p=1 ,q=1):
     """
     Apply GARCH(p,q) model to a rolling window of returns and forecast volatility.
@@ -264,6 +278,30 @@ def garch(window_returns, foreast_horizon=1 ,p=1 ,q=1):
     except Exception as e:
         print(f"Error in GARCH fitting: {e}")
         return np.nan
+
+def rolling_garch_parallel(returns: pd.Series, window: int, n_jobs: int = -1, **garch_kwargs):
+    """
+    Compute rolling GARCH volatility in parallel using joblib.
+    returns: pd.Series of returns
+    window: rolling window size
+    n_jobs: number of parallel jobs (-1 = all CPUs)
+    garch_kwargs: arguments for garch()
+    Returns: pd.Series of GARCH volatility estimates
+    """
+    # Prepare rolling windows
+    windows = [returns.iloc[i-window:i] for i in range(window, len(returns)+1)]
+    indices = returns.index[window-1:]
+
+    # Run GARCH in parallel
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(garch)(w, **garch_kwargs) for w in windows
+    )
+
+    # Build result series
+    garch_series = pd.Series(results, index=indices)
+    # Optionally, forward-fill to match original index length
+    garch_series = garch_series.reindex(returns.index)
+    return garch_series
 
 # ----------- CLASSES -----------
 
