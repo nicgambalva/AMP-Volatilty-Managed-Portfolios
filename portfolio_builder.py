@@ -148,7 +148,7 @@ def identify_future(name, future_class = None):
                 return future
     raise ValueError(f"Future {name} not found in any data.")
 
-# A function that gets a specific contravct data type from data defined in the environment
+# A function that gets a specific contract data type from data defined in the environment
 # It takes the name of the contract and the data type as arguments
 # It returns the data as a pandas DataFrame with no NaN values
 def get_contract_data(contract_ticker, price_type):
@@ -226,7 +226,7 @@ def plot_weights(weights_df, title='Weights overtime', figsize=(15, 10), dpi=300
     plt.tight_layout()
     plt.show()
 
-def downside_volatility(returns: pd.Series) -> float:
+def downside_volatility(returns: pd.Series):
     """
     Calculate downside volatility (semi-deviation)
     """
@@ -240,14 +240,8 @@ def downside_volatility(returns: pd.Series) -> float:
     return np.sqrt(np.mean(modified_returns ** 2))
 
 @njit
-def downside_volatility_numba(returns: np.ndarray) -> float:
-    """
-    Calculate downside volatility (semi-deviation) using Numba for performance
-    """
-    if not isinstance(returns, np.ndarray):
-        raise ValueError("Returns must be a numpy array.")
-    
-    # Replace positive returns with 0
+def downside_volatility_numba(returns):
+    # Assume returns is a 1D numpy array
     modified_returns = np.where(returns > 0, 0, returns)
     return np.sqrt(np.mean(modified_returns ** 2))
 
@@ -944,16 +938,16 @@ class Future:
             realized_vol_roll_log_12MROLL = log_returns_filtered.rolling(window=252).std()
 
             # Calculating downside realized volatility for filtered returns
-            realized_downside_vol_roll_1MROLL = returns_filtered.rolling(window=21).apply(lambda x: downside_volatility(x), raw=False)
-            realized_downside_vol_roll_3MROLL = returns_filtered.rolling(window=63).apply(lambda x: downside_volatility(x), raw=False)
-            realized_downside_vol_roll_6MROLL = returns_filtered.rolling(window=126).apply(lambda x: downside_volatility(x), raw=False)
-            realized_downside_vol_roll_12MROLL = returns_filtered.rolling(window=252).apply(lambda x: downside_volatility(x), raw=False)
+            realized_downside_vol_roll_1MROLL = returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+            realized_downside_vol_roll_3MROLL = returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+            realized_downside_vol_roll_6MROLL = returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+            realized_downside_vol_roll_12MROLL = returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False)
 
             # Calculating garch volatility
-            garch_volatility_1MROLL = returns_filtered.rolling(window=21).apply(lambda x: garch(x), raw=False)
-            garch_volatility_3MROLL = returns_filtered.rolling(window=63).apply(lambda x: garch(x), raw=False)
-            garch_volatility_6MROLL = returns_filtered.rolling(window=126).apply(lambda x: garch(x), raw=False)
-            garch_volatility_12MROLL = returns_filtered.rolling(window=252).apply(lambda x: garch(x), raw=False)
+            garch_volatility_1MROLL = rolling_garch_parallel(returns_filtered, window=21, n_jobs=-1)
+            garch_volatility_3MROLL = rolling_garch_parallel(returns_filtered, window=63, n_jobs=-1)
+            garch_volatility_6MROLL = rolling_garch_parallel(returns_filtered, window=126, n_jobs=-1)
+            garch_volatility_12MROLL = rolling_garch_parallel(returns_filtered, window=252, n_jobs=-1)
                         
             # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
             realized_vol_roll_1MROLL = realized_vol_roll_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
@@ -1031,16 +1025,16 @@ class Future:
                 realized_vol_currency_log_12MROLL = currency_log_returns_filtered.rolling(window=252).std()
 
                 # Downside realized volatility for filtered returns
-                realized_downside_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility(x), raw=False)
-                realized_downside_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility(x), raw=False)
-                realized_downside_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility(x), raw=False)
-                realized_downside_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+                realized_downside_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+                realized_downside_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+                realized_downside_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False)
 
                 # GARCH Volatility Estimation
-                garch_volatility_currency_1MROLL = currency_returns_filtered.rolling(window=21).apply(lambda x: garch(x), raw=False)
-                garch_volatility_currency_3MROLL = currency_returns_filtered.rolling(window=63).apply(lambda x: garch(x), raw=False)
-                garch_volatility_currency_6MROLL = currency_returns_filtered.rolling(window=126).apply(lambda x: garch(x), raw=False)
-                garch_volatility_currency_12MROLL = currency_returns_filtered.rolling(window=252).apply(lambda x: garch(x), raw=False)
+                garch_volatility_currency_1MROLL = rolling_garch_parallel(currency_returns_filtered, window=21, n_jobs=-1)
+                garch_volatility_currency_3MROLL = rolling_garch_parallel(currency_returns_filtered, window=63, n_jobs=-1)
+                garch_volatility_currency_6MROLL = rolling_garch_parallel(currency_returns_filtered, window=126, n_jobs=-1)
+                garch_volatility_currency_12MROLL = rolling_garch_parallel(currency_returns_filtered, window=252, n_jobs=-1)
                 
                 # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
                 realized_vol_currency_1MROLL = realized_vol_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
@@ -1116,10 +1110,10 @@ class Future:
                 realized_vol_price_base_currency_log_12MROLL = price_base_currency_log_returns_filtered.rolling(window=252).std()
 
                 # Downside realized volatility for filtered returns
-                realized_downside_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility(x), raw=False)
-                realized_downside_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility(x), raw=False)
-                realized_downside_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility(x), raw=False)
-                realized_downside_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility(x), raw=False)
+                realized_downside_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+                realized_downside_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+                realized_downside_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+                realized_downside_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False)
                 
                 # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
                 realized_vol_price_base_currency_1MROLL = realized_vol_price_base_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
