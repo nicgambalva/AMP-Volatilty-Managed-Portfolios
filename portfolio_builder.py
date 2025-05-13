@@ -7,6 +7,7 @@
 # applied to futures, particularly futures on equity indexes and commodities.
 # The classes are:
 # - contract: A class that represents a particular futures contract
+# - currency: A class that represents a currency and its exchange rates
 # - futures: A class that represents a collections of futures contracts with the same underlying asset
 # - strategy: A class that represents a time series of the implementation of a portfolio construction technique
 
@@ -97,6 +98,12 @@ SUPPORTED_ESTIMATION_WINDOWS = {
     '3M': 63, # 3 Months
     '6M': 126, # 6 Months
     '12M': 252 # 12 Months
+}
+
+SUPPORTED_VOLATILITY_METHODS = {
+    'REALIZED_VOL': 'Realized Volatility',
+    'DOWNSIDE_VOL': 'Downside Volatility',
+    'GARCH': 'GARCH Volatility'
 }
 
 # ----------- FUNCTIONS -----------
@@ -205,7 +212,7 @@ def plot_weights(weights_df, title='Weights overtime', figsize=(15, 10), dpi=300
 
     # Plotting
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    fig.suptitle(title, fontsize=20)
+    # fig.suptitle(title, fontsize=20)
 
     # Stacked bar plot
     for idx, contract in enumerate(weights_df_cleaned.columns):
@@ -246,56 +253,56 @@ def downside_volatility_numba(returns):
     return np.sqrt(np.mean(modified_returns ** 2))
 
 
-def garch(window_returns, foreast_horizon=1 ,p=1 ,q=1):
-    """
-    Apply GARCH(p,q) model to a rolling window of returns and forecast volatility.
-    Designed to be used with pd.DataFrame()
-    """
-    # Skip if window has NaN values (incomplete window)
-    if window_returns.isna().any():
-        return np.nan
-    
-    try:
-        # Fit GARCH model
-        model = arch_model(window_returns, vol='Garch', p=p, q=q)
-        fitted_model = model.fit(disp='off')
-        
-        # Forecast specified horizon ahead
-        forecast = fitted_model.forecast(horizon=foreast_horizon)
-        
-        # Return the full forecast or just the first step
-        if foreast_horizon == 1:
-            return forecast.variance.values[-1, 0]
-        else:
-            return forecast.variance.values[-1, :]
-    
-    except Exception as e:
-        print(f"Error in GARCH fitting: {e}")
-        return np.nan
-
-def rolling_garch_parallel(returns: pd.Series, window: int, n_jobs: int = -1, **garch_kwargs):
-    """
-    Compute rolling GARCH volatility in parallel using joblib.
-    returns: pd.Series of returns
-    window: rolling window size
-    n_jobs: number of parallel jobs (-1 = all CPUs)
-    garch_kwargs: arguments for garch()
-    Returns: pd.Series of GARCH volatility estimates
-    """
-    # Prepare rolling windows
-    windows = [returns.iloc[i-window:i] for i in range(window, len(returns)+1)]
-    indices = returns.index[window-1:]
-
-    # Run GARCH in parallel
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(garch)(w, **garch_kwargs) for w in windows
-    )
-
-    # Build result series
-    garch_series = pd.Series(results, index=indices)
-    # Optionally, forward-fill to match original index length
-    garch_series = garch_series.reindex(returns.index)
-    return garch_series
+#def garch(window_returns, foreast_horizon=1 ,p=1 ,q=1):
+#    """
+#    Apply GARCH(p,q) model to a rolling window of returns and forecast volatility.
+#    Designed to be used with pd.DataFrame()
+#    """
+#    # Skip if window has NaN values (incomplete window)
+#    if window_returns.isna().any():
+#        return np.nan
+#    
+#    try:
+#        # Fit GARCH model
+#        model = arch_model(window_returns, vol='Garch', p=p, q=q)
+#        fitted_model = model.fit(disp='off')
+#        
+#        # Forecast specified horizon ahead
+#        forecast = fitted_model.forecast(horizon=foreast_horizon)
+#        
+#        # Return the full forecast or just the first step
+#        if foreast_horizon == 1:
+#            return forecast.variance.values[-1, 0]
+#        else:
+#            return forecast.variance.values[-1, :]
+#    
+#    except Exception as e:
+#        print(f"Error in GARCH fitting: {e}")
+#        return np.nan
+#
+#def rolling_garch_parallel(returns: pd.Series, window: int, n_jobs: int = -1, **garch_kwargs):
+#    """
+#    Compute rolling GARCH volatility in parallel using joblib.
+#    returns: pd.Series of returns
+#    window: rolling window size
+#    n_jobs: number of parallel jobs (-1 = all CPUs)
+#    garch_kwargs: arguments for garch()
+#    Returns: pd.Series of GARCH volatility estimates
+#    """
+#    # Prepare rolling windows
+#    windows = [returns.iloc[i-window:i] for i in range(window, len(returns)+1)]
+#    indices = returns.index[window-1:]
+#
+#    # Run GARCH in parallel
+#    results = Parallel(n_jobs=n_jobs)(
+#        delayed(garch)(w, **garch_kwargs) for w in windows
+#    )
+#
+#    # Build result series
+#    garch_series = pd.Series(results, index=indices)
+#    # Optionally, forward-fill to match original index length
+#    garch_series = garch_series.reindex(returns.index)
+#    return garch_series
 
 # ----------- CLASSES -----------
 
@@ -774,6 +781,46 @@ class Future:
         all_dates = all_dates.drop_duplicates()
         return all_dates
     
+    def garch(self, window_returns, estimation_window='1M', forecast_horizon=1, p=1, q=1, scale_factor=1000):
+        window_size = SUPPORTED_ESTIMATION_WINDOWS.get(estimation_window)
+        if window_size is None:
+            raise ValueError(f"Unsupported estimation window: {estimation_window}")
+        # Remove NaNs and check for enough data
+        window_returns = window_returns[-window_size:].dropna()
+        if len(window_returns) < window_size or window_returns.std() == 0:
+            return np.nan
+        try:
+            scaled_returns = window_returns * scale_factor
+            model = arch_model(scaled_returns, vol='Garch', p=p, q=q)
+            fitted_model = model.fit(disp='off')
+            forecast = fitted_model.forecast(horizon=forecast_horizon)
+            if forecast_horizon == 1:
+                return np.sqrt(forecast.variance.values[-1, 0]) / scale_factor
+            else:
+                return np.sqrt(forecast.variance.values[-1, :]) / scale_factor
+        except Exception as e:
+            print(f"Error in GARCH fitting: {e}")
+            return np.nan
+        
+    def rolling_garch_parallel(self, returns: pd.Series, estimation_window: str = '1M', n_jobs: int = -1, scale_factor=1000, step: int = 5, **garch_kwargs):
+        """
+        Compute rolling GARCH volatility in parallel using joblib, only every `step`th day, then interpolate.
+        """
+        window_size = SUPPORTED_ESTIMATION_WINDOWS.get(estimation_window)
+        if window_size is None:
+            raise ValueError(f"Unsupported estimation window: {estimation_window}")
+        # Only every `step`th window
+        indices = returns.index[window_size-1::step]
+        windows = [returns.iloc[i-window_size:i] for i in range(window_size, len(returns)+1, step)]
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(self.garch)(w, estimation_window=estimation_window, scale_factor=scale_factor, **garch_kwargs) for w in windows
+        )
+        # Build sparse result series
+        garch_series_sparse = pd.Series(results, index=indices)
+        # Interpolate to full index
+        garch_series = garch_series_sparse.reindex(returns.index).interpolate(method='time').ffill().bfill()
+        return garch_series
+    
     ###############################################################################
     
     # @njit(cache=True)
@@ -892,292 +939,158 @@ class Future:
         return roll_settle_theoretical
 
     
-    def build_theoretical_roll_settle(self, initial_investment: float = 1000, date_delta: int = 0, maturity_delta: int = 0, start_date: pd.Timestamp = None, end_date: pd.Timestamp = None, sd_filter: int = 5):
+    def build_theoretical_roll(self, initial_investment=1000, date_delta=0, maturity_delta=0, start_date=None, end_date=None):
         """
-        This runs the return_roll_settle function, storing the result within the class
-        Then also performs some calculations for returns and log returns, which are also stored within the class
-        Build a time series of the value of a theoretical portfolio of initial_cash invested in the future, being rolled
-        It can be rolled at the maturity date, or date_delta days before the maturity date.
-        It is normally rolled always with the next maturity contract, but (although not recommended) it can be rolled with the second, third, etc. contract (this is done with maturity_delta).
-        initial_cash: the initial amount of cash invested in the future
-        date_delta: the number of days to add to the date. This is useful if we want to roll before the maturity date.
-        maturity_delta: the number of contracts to roll. This is useful if we want to roll with the second, third, etc. contract.
-        start_date: the start date of the time series. If None, it will be the first date of the future.
-        end_date: the end date of the time series. If None, it will be the last date of the future.
+        Builds the theoretical roll and computes returns and log returns.
         """
-        # Checking that the sd_filter is a positive integer
-        if not isinstance(sd_filter, int) or sd_filter < 0:
-            raise ValueError("sd_filter must be a positive integer.")
-                
-        
-        try:
-            self.roll_settle_theoretical = self.return_roll_settle(initial_investment, date_delta, maturity_delta, start_date, end_date)
-            returns = self.roll_settle_theoretical['Roll value'].pct_change()
-            log_returns = np.log(self.roll_settle_theoretical['Roll value'] / self.roll_settle_theoretical['Roll value'].shift(1))
-            self.roll_settle_theoretical_returns = returns
-            self.roll_settle_theoretical_log_returns = log_returns
-            
-            # Filtering the returns and log returns using the sd_filter (number of standard deviations from the mean)
-            sd_returns = returns.std()
-            sg_log_returns = log_returns.std()
-            ub_returns = returns.mean() + sd_filter * sd_returns
-            lb_returns = returns.mean() - sd_filter * sd_returns
-            ub_log_returns = log_returns.mean() + sd_filter * sg_log_returns
-            lb_log_returns = log_returns.mean() - sd_filter * sg_log_returns
-            returns_filtered = returns[(returns < ub_returns) & (returns > lb_returns)]
-            log_returns_filtered = log_returns[(log_returns < ub_log_returns) & (log_returns > lb_log_returns)]
-            
-            # Calculating the realized volatility for the filtered returns and log returns
-            realized_vol_roll_1MROLL = returns_filtered.rolling(window=21).std()
-            realized_vol_roll_3MROLL = returns_filtered.rolling(window=63).std()
-            realized_vol_roll_6MROLL = returns_filtered.rolling(window=126).std()
-            realized_vol_roll_12MROLL = returns_filtered.rolling(window=252).std()
-            realized_vol_roll_log_1MROLL = log_returns_filtered.rolling(window=21).std()
-            realized_vol_roll_log_3MROLL = log_returns_filtered.rolling(window=63).std()
-            realized_vol_roll_log_6MROLL = log_returns_filtered.rolling(window=126).std()
-            realized_vol_roll_log_12MROLL = log_returns_filtered.rolling(window=252).std()
+        self.roll_settle_theoretical = self.return_roll_settle(initial_investment, date_delta, maturity_delta, start_date, end_date)
+        returns = self.roll_settle_theoretical['Roll value'].pct_change()
+        log_returns = np.log(self.roll_settle_theoretical['Roll value'] / self.roll_settle_theoretical['Roll value'].shift(1))
+        self.roll_settle_theoretical_returns = returns
+        self.roll_settle_theoretical_log_returns = log_returns
 
-            # Calculating downside realized volatility for filtered returns
-            realized_downside_vol_roll_1MROLL = returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-            realized_downside_vol_roll_3MROLL = returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-            realized_downside_vol_roll_6MROLL = returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-            realized_downside_vol_roll_12MROLL = returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+    def filter_returns(self, sd_filter=5):
+        """
+        Filters returns and log returns using the sd_filter.
+        """
+        returns = self.roll_settle_theoretical_returns
+        log_returns = self.roll_settle_theoretical_log_returns
+        sd_returns = returns.std()
+        sd_log_returns = log_returns.std()
+        ub_returns = returns.mean() + sd_filter * sd_returns
+        lb_returns = returns.mean() - sd_filter * sd_returns
+        ub_log_returns = log_returns.mean() + sd_filter * sd_log_returns
+        lb_log_returns = log_returns.mean() - sd_filter * sd_log_returns
+        self.returns_filtered = returns[(returns < ub_returns) & (returns > lb_returns)]
+        self.log_returns_filtered = log_returns[(log_returns < ub_log_returns) & (log_returns > lb_log_returns)]
 
-            # Calculating garch volatility
-            garch_volatility_1MROLL = rolling_garch_parallel(returns_filtered, window=21, n_jobs=-1)
-            garch_volatility_3MROLL = rolling_garch_parallel(returns_filtered, window=63, n_jobs=-1)
-            garch_volatility_6MROLL = rolling_garch_parallel(returns_filtered, window=126, n_jobs=-1)
-            garch_volatility_12MROLL = rolling_garch_parallel(returns_filtered, window=252, n_jobs=-1)
-                        
-            # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
-            realized_vol_roll_1MROLL = realized_vol_roll_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            realized_vol_roll_3MROLL = realized_vol_roll_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            realized_vol_roll_6MROLL = realized_vol_roll_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            realized_vol_roll_12MROLL = realized_vol_roll_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            garch_volatility_1MROLL = garch_volatility_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            garch_volatility_3MROLL = garch_volatility_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            garch_volatility_6MROLL = garch_volatility_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            garch_volatility_12MROLL = garch_volatility_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            realized_vol_roll_log_1MROLL = realized_vol_roll_log_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            realized_vol_roll_log_3MROLL = realized_vol_roll_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            realized_vol_roll_log_6MROLL = realized_vol_roll_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            realized_vol_roll_log_12MROLL = realized_vol_roll_log_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-            
-            # Storing the realized volatility in the class
-            self.realized_vol_roll_1MROLL = realized_vol_roll_1MROLL
-            self.realized_vol_roll_3MROLL = realized_vol_roll_3MROLL
-            self.realized_vol_roll_6MROLL = realized_vol_roll_6MROLL
-            self.realized_vol_roll_12MROLL = realized_vol_roll_12MROLL
-            self.realized_vol_roll_log_1MROLL = realized_vol_roll_log_1MROLL
-            self.realized_vol_roll_log_3MROLL = realized_vol_roll_log_3MROLL
-            self.realized_vol_roll_log_6MROLL = realized_vol_roll_log_6MROLL
-            self.realized_vol_roll_log_12MROLL = realized_vol_roll_log_12MROLL
-            self.realized_downside_vol_roll_1MROLL = realized_downside_vol_roll_1MROLL
-            self.realized_downside_vol_roll_3MROLL = realized_downside_vol_roll_3MROLL
-            self.realized_downside_vol_roll_6MROLL = realized_downside_vol_roll_6MROLL
-            self.realized_downside_vol_roll_12MROLL = realized_downside_vol_roll_12MROLL
-            self.garch_volatility_1MROLL = garch_volatility_1MROLL
-            self.garch_volatility_3MROLL = garch_volatility_3MROLL
-            self.garch_volatility_6MROLL = garch_volatility_6MROLL
-            self.garch_volatility_12MROLL = garch_volatility_12MROLL
-        
-            # If the currency object is not None, we will also build the realized volatility for the fx rate returns
-            # And the net realized volatility for the future (we first transform the price to the base currency, then we calculate the returns)
-            if self.currency_object is not None:
-                # We get all the dates get_all_dates
-                # And if there are dates for which px_last is not available for those dates
-                # We will interpolate the px_last to get the values for those dates
-                # Getting the dates
-                # dates = pd.to_datetime(self.get_all_dates())
-                # dates = dates[(dates >= start_date) & (dates <= end_date)]
-                # dates = dates.sort_values()
-                
-                # Getting the currency data for the dates
-                currency_data = self.currency_object.px_last.loc[self.roll_settle_theoretical.index]
-                currency_data = currency_data.dropna()
-                currency_data = currency_data[~currency_data.index.isna()]
-                currency_data = currency_data[~currency_data.index.isin([pd.NaT])]
-                currency_data = currency_data[~currency_data.index.duplicated(keep='first')]
-                currency_data = currency_data.reindex(self.roll_settle_theoretical.index, method='ffill')
-                
-                # Getting the currency returns and log returns
-                currency_returns = currency_data.pct_change()
-                currency_log_returns = np.log(currency_data / currency_data.shift(1))
-                
-                # Filtering the returns and log returns using the sd_filter (number of standard deviations from the mean)
-                sd_currency_returns = currency_returns.std()
-                sd_currency_log_returns = currency_log_returns.std()
-                ub_currency_returns = currency_returns.mean() + sd_filter * sd_currency_returns
-                lb_currency_returns = currency_returns.mean() - sd_filter * sd_currency_returns
-                ub_currency_log_returns = currency_log_returns.mean() + sd_filter * sd_currency_log_returns
-                lb_currency_log_returns = currency_log_returns.mean() - sd_filter * sd_currency_log_returns
-                currency_returns_filtered = currency_returns[(currency_returns < ub_currency_returns) & (currency_returns > lb_currency_returns)]
-                currency_log_returns_filtered = currency_log_returns[(currency_log_returns < ub_currency_log_returns) & (currency_log_returns > lb_currency_log_returns)]
-                
-                # Calculating the realized volatility for the filtered returns and log returns
-                realized_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).std()
-                realized_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).std()
-                realized_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).std()
-                realized_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).std()
-                realized_vol_currency_log_1MROLL = currency_log_returns_filtered.rolling(window=21).std()
-                realized_vol_currency_log_3MROLL = currency_log_returns_filtered.rolling(window=63).std()
-                realized_vol_currency_log_6MROLL = currency_log_returns_filtered.rolling(window=126).std()
-                realized_vol_currency_log_12MROLL = currency_log_returns_filtered.rolling(window=252).std()
+    def build_classic_vols(self):
+        """
+        Calculates classic realized and downside volatility for filtered returns.
+        Handles reindexing to match roll_settle_theoretical index.
+        """
+        rf = self.returns_filtered
+        lrf = self.log_returns_filtered
+        idx = self.roll_settle_theoretical.index
 
-                # Downside realized volatility for filtered returns
-                realized_downside_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-                realized_downside_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-                realized_downside_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-                realized_downside_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False)
+        self.realized_vol_roll_1MROLL = rf.rolling(window=21).std().reindex(idx, method='ffill')
+        self.realized_vol_roll_3MROLL = rf.rolling(window=63).std().reindex(idx, method='ffill')
+        self.realized_vol_roll_6MROLL = rf.rolling(window=126).std().reindex(idx, method='ffill')
+        self.realized_vol_roll_12MROLL = rf.rolling(window=252).std().reindex(idx, method='ffill')
+        self.realized_vol_roll_log_1MROLL = lrf.rolling(window=21).std().reindex(idx, method='ffill')
+        self.realized_vol_roll_log_3MROLL = lrf.rolling(window=63).std().reindex(idx, method='ffill')
+        self.realized_vol_roll_log_6MROLL = lrf.rolling(window=126).std().reindex(idx, method='ffill')
+        self.realized_vol_roll_log_12MROLL = lrf.rolling(window=252).std().reindex(idx, method='ffill')
+        self.realized_downside_vol_roll_1MROLL = rf.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_roll_3MROLL = rf.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_roll_6MROLL = rf.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_roll_12MROLL = rf.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
 
-                # GARCH Volatility Estimation
-                garch_volatility_currency_1MROLL = rolling_garch_parallel(currency_returns_filtered, window=21, n_jobs=-1)
-                garch_volatility_currency_3MROLL = rolling_garch_parallel(currency_returns_filtered, window=63, n_jobs=-1)
-                garch_volatility_currency_6MROLL = rolling_garch_parallel(currency_returns_filtered, window=126, n_jobs=-1)
-                garch_volatility_currency_12MROLL = rolling_garch_parallel(currency_returns_filtered, window=252, n_jobs=-1)
-                
-                # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
-                realized_vol_currency_1MROLL = realized_vol_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_currency_3MROLL = realized_vol_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_currency_6MROLL = realized_vol_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_currency_12MROLL = realized_vol_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_currency_log_1MROLL = realized_vol_currency_log_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_currency_log_3MROLL = realized_vol_currency_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_currency_log_6MROLL = realized_vol_currency_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_currency_log_12MROLL = realized_vol_currency_log_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                garch_volatility_currency_1MROLL = garch_volatility_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                garch_volatility_currency_3MROLL = garch_volatility_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                garch_volatility_currency_6MROLL = garch_volatility_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                garch_volatility_currency_12MROLL= garch_volatility_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_currency_1MROLL = realized_downside_vol_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_currency_3MROLL = realized_downside_vol_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_currency_6MROLL = realized_downside_vol_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_currency_12MROLL = realized_downside_vol_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                
-                # Storing the realized volatility in the class
-                self.realized_vol_currency_1MROLL = realized_vol_currency_1MROLL
-                self.realized_vol_currency_3MROLL = realized_vol_currency_3MROLL
-                self.realized_vol_currency_6MROLL = realized_vol_currency_6MROLL
-                self.realized_vol_currency_12MROLL = realized_vol_currency_12MROLL
-                self.realized_vol_currency_log_1MROLL = realized_vol_currency_log_1MROLL
-                self.realized_vol_currency_log_3MROLL = realized_vol_currency_log_3MROLL
-                self.realized_vol_currency_log_6MROLL = realized_vol_currency_log_6MROLL
-                self.realized_vol_currency_log_12MROLL = realized_vol_currency_log_12MROLL
-                self.realized_downside_vol_currency_1MROLL = realized_downside_vol_currency_1MROLL
-                self.realized_downside_vol_currency_3MROLL = realized_downside_vol_currency_3MROLL
-                self.realized_downside_vol_currency_6MROLL = realized_downside_vol_currency_6MROLL
-                self.realized_downside_vol_currency_12MROLL = realized_downside_vol_currency_12MROLL
-                self.garch_volatility_currency_1MROLL = garch_volatility_currency_1MROLL
-                self.garch_volatility_currency_3MROLL = garch_volatility_currency_3MROLL
-                self.garch_volatility_currency_6MROLL = garch_volatility_currency_6MROLL
-                self.garch_volatility_currency_12MROLL = garch_volatility_currency_12MROLL
+    def build_garch_vols(self, step: int = 5):
+        """
+        Calculates GARCH volatility for filtered returns.
+        Handles reindexing to match roll_settle_theoretical index.
+        The 'step' parameter controls how often GARCH is computed (e.g., every 5th day).
+        """
+        rf = self.returns_filtered
+        idx = self.roll_settle_theoretical.index
+        self.garch_volatility_1MROLL = self.rolling_garch_parallel(rf, estimation_window='1M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_3MROLL = self.rolling_garch_parallel(rf, estimation_window='3M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_6MROLL = self.rolling_garch_parallel(rf, estimation_window='6M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_12MROLL = self.rolling_garch_parallel(rf, estimation_window='12M', n_jobs=-1, step=step).reindex(idx, method='ffill')
 
-                
-                # Calculating the net realized volatility for the future
-                # We first transform the price to the base currency, then we calculate the returns
-                # Getting the price in the base currency
-                # Align indices before multiplying
-                fx_px_last_aligned = self.currency_object.px_last.reindex(self.roll_settle_theoretical.index, method='ffill')
-                price_base_currency = self.roll_settle_theoretical['Roll value'] * fx_px_last_aligned
-                price_base_currency = price_base_currency.dropna()
-                price_base_currency = price_base_currency[~price_base_currency.index.isna()]
-                price_base_currency = price_base_currency[~price_base_currency.index.isin([pd.NaT])]
-                price_base_currency = price_base_currency[~price_base_currency.index.duplicated(keep='first')]
-                price_base_currency = price_base_currency.reindex(self.roll_settle_theoretical.index, method='ffill')
-                
-                # Getting the returns and log returns
-                price_base_currency_returns = price_base_currency.pct_change()
-                price_base_currency_log_returns = np.log(price_base_currency / price_base_currency.shift(1))
-                
-                # Filtering the returns and log returns using the sd_filter (number of standard deviations from the mean)
-                sd_price_base_currency_returns = price_base_currency_returns.std()
-                sd_price_base_currency_log_returns = price_base_currency_log_returns.std()
-                ub_price_base_currency_returns = price_base_currency_returns.mean() + sd_filter * sd_price_base_currency_returns
-                lb_price_base_currency_returns = price_base_currency_returns.mean() - sd_filter * sd_price_base_currency_returns
-                ub_price_base_currency_log_returns = price_base_currency_log_returns.mean() + sd_filter * sd_price_base_currency_log_returns
-                lb_price_base_currency_log_returns = price_base_currency_log_returns.mean() - sd_filter * sd_price_base_currency_log_returns
-                price_base_currency_returns_filtered = price_base_currency_returns[(price_base_currency_returns < ub_price_base_currency_returns) & (price_base_currency_returns > lb_price_base_currency_returns)]
-                price_base_currency_log_returns_filtered = price_base_currency_log_returns[(price_base_currency_log_returns < ub_price_base_currency_log_returns) & (price_base_currency_log_returns > lb_price_base_currency_log_returns)]
-                
-                # Calculating the realized volatility for the filtered returns and log returns
-                realized_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).std()
-                realized_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).std()
-                realized_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).std()
-                realized_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).std()
-                realized_vol_price_base_currency_log_1MROLL = price_base_currency_log_returns_filtered.rolling(window=21).std()
-                realized_vol_price_base_currency_log_3MROLL = price_base_currency_log_returns_filtered.rolling(window=63).std()
-                realized_vol_price_base_currency_log_6MROLL = price_base_currency_log_returns_filtered.rolling(window=126).std()
-                realized_vol_price_base_currency_log_12MROLL = price_base_currency_log_returns_filtered.rolling(window=252).std()
+    def build_fx_and_base_currency_vols(self, sd_filter=5):
+        """
+        Handles all the currency_object and price_base_currency volatility calculations, including reindexing.
+        NON-GARCH version: only realized and downside vols.
+        """
+        idx = self.roll_settle_theoretical.index
+        currency_data = self.currency_object.px_last.loc[idx].dropna().reindex(idx, method='ffill')
+        currency_returns = currency_data.pct_change()
+        currency_log_returns = np.log(currency_data / currency_data.shift(1))
+        sd_currency_returns = currency_returns.std()
+        sd_currency_log_returns = currency_log_returns.std()
+        ub_currency_returns = currency_returns.mean() + sd_filter * sd_currency_returns
+        lb_currency_returns = currency_returns.mean() - sd_filter * sd_currency_returns
+        ub_currency_log_returns = currency_log_returns.mean() + sd_filter * sd_currency_log_returns
+        lb_currency_log_returns = currency_log_returns.mean() - sd_filter * sd_currency_log_returns
+        currency_returns_filtered = currency_returns[(currency_returns < ub_currency_returns) & (currency_returns > lb_currency_returns)]
+        currency_log_returns_filtered = currency_log_returns[(currency_log_returns < ub_currency_log_returns) & (currency_log_returns > lb_currency_log_returns)]
 
-                # Downside realized volatility for filtered returns
-                realized_downside_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-                realized_downside_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-                realized_downside_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-                realized_downside_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False)
-                
-                # For all the dates not in the filtered data, we set the realized volatility to the last value (or NaN if no value)
-                realized_vol_price_base_currency_1MROLL = realized_vol_price_base_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_price_base_currency_3MROLL = realized_vol_price_base_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_price_base_currency_6MROLL = realized_vol_price_base_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_price_base_currency_12MROLL = realized_vol_price_base_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_price_base_currency_1MROLL = realized_downside_vol_price_base_currency_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_price_base_currency_3MROLL = realized_downside_vol_price_base_currency_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_price_base_currency_6MROLL = realized_downside_vol_price_base_currency_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_downside_vol_price_base_currency_12MROLL = realized_downside_vol_price_base_currency_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_price_base_currency_log_1MROLL = realized_vol_price_base_currency_log_1MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_price_base_currency_log_3MROLL = realized_vol_price_base_currency_log_3MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_price_base_currency_log_6MROLL = realized_vol_price_base_currency_log_6MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                realized_vol_price_base_currency_log_12MROLL = realized_vol_price_base_currency_log_12MROLL.reindex(self.roll_settle_theoretical.index, method='ffill')
-                
-                # Storing the realized volatility in the class
-                self.realized_vol_price_base_currency_1MROLL = realized_vol_price_base_currency_1MROLL
-                self.realized_vol_price_base_currency_3MROLL = realized_vol_price_base_currency_3MROLL
-                self.realized_vol_price_base_currency_6MROLL = realized_vol_price_base_currency_6MROLL
-                self.realized_vol_price_base_currency_12MROLL = realized_vol_price_base_currency_12MROLL
-                self.realized_vol_price_base_currency_log_1MROLL = realized_vol_price_base_currency_log_1MROLL
-                self.realized_vol_price_base_currency_log_3MROLL = realized_vol_price_base_currency_log_3MROLL
-                self.realized_vol_price_base_currency_log_6MROLL = realized_vol_price_base_currency_log_6MROLL
-                self.realized_vol_price_base_currency_log_12MROLL = realized_vol_price_base_currency_log_12MROLL
-                self.realized_downside_vol_price_base_currency_1MROLL = realized_downside_vol_price_base_currency_1MROLL
-                self.realized_downside_vol_price_base_currency_3MROLL = realized_downside_vol_price_base_currency_3MROLL
-                self.realized_downside_vol_price_base_currency_6MROLL = realized_downside_vol_price_base_currency_6MROLL
-                self.realized_downside_vol_price_base_currency_12MROLL = realized_downside_vol_price_base_currency_12MROLL
-            
-            # We check all the voatilities we have built
-            # It can never go to 0. If it does we have to do a forward fill
-            for vol in ['realized_vol_roll_1MROLL', 'realized_vol_roll_3MROLL', 'realized_vol_roll_6MROLL', 'realized_vol_roll_12MROLL', 'realized_vol_roll_log_1MROLL', 'realized_vol_roll_log_3MROLL', 'realized_vol_roll_log_6MROLL', 'realized_vol_roll_log_12MROLL']:
-                if getattr(self, vol).isna().sum() > 0:
-                    getattr(self, vol).fillna(method='ffill', inplace=True)
-                    
-                # Now any 0 values we have to set to the last value
-                if (getattr(self, vol) == 0).sum() > 0:
-                    getattr(self, vol).replace(0, np.nan, inplace=True)
-                    getattr(self, vol).fillna(method='ffill', inplace=True)
-            
-            # The same but now if the currency object is not None
-            if self.currency_object is not None:
-                for vol in ['realized_vol_currency_1MROLL', 'realized_vol_currency_3MROLL', 'realized_vol_currency_6MROLL', 'realized_vol_currency_12MROLL', 'realized_vol_currency_log_1MROLL', 'realized_vol_currency_log_3MROLL', 'realized_vol_currency_log_6MROLL', 'realized_vol_currency_log_12MROLL']:
-                    if getattr(self, vol).isna().sum() > 0:
-                        getattr(self, vol).fillna(method='ffill', inplace=True)
-                        
-                    # Now any 0 values we have to set to the last value
-                    if (getattr(self, vol) == 0).sum() > 0:
-                        getattr(self, vol).replace(0, np.nan, inplace=True)
-                        getattr(self, vol).fillna(method='ffill', inplace=True)
-                
-                # The same but now for the price base currency
-                for vol in ['realized_vol_price_base_currency_1MROLL', 'realized_vol_price_base_currency_3MROLL', 'realized_vol_price_base_currency_6MROLL', 'realized_vol_price_base_currency_12MROLL', 'realized_vol_price_base_currency_log_1MROLL', 'realized_vol_price_base_currency_log_3MROLL', 'realized_vol_price_base_currency_log_6MROLL', 'realized_vol_price_base_currency_log_12MROLL']:
-                    if getattr(self, vol).isna().sum() > 0:
-                        getattr(self, vol).fillna(method='ffill', inplace=True)
-                        
-                    # Now any 0 values we have to set to the last value
-                    if (getattr(self, vol) == 0).sum() > 0:
-                        getattr(self, vol).replace(0, np.nan, inplace=True)
-                        getattr(self, vol).fillna(method='ffill', inplace=True)
-            
-        except ValueError:
-            raise ValueError(f"Error in return_roll_settle: {self.name} - {self.type} - {self.currency}")
-        
+        # Realized vols (NO GARCH)
+        self.realized_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).std().reindex(idx, method='ffill')
+        self.realized_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).std().reindex(idx, method='ffill')
+        self.realized_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).std().reindex(idx, method='ffill')
+        self.realized_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).std().reindex(idx, method='ffill')
+        self.realized_vol_currency_log_1MROLL = currency_log_returns_filtered.rolling(window=21).std().reindex(idx, method='ffill')
+        self.realized_vol_currency_log_3MROLL = currency_log_returns_filtered.rolling(window=63).std().reindex(idx, method='ffill')
+        self.realized_vol_currency_log_6MROLL = currency_log_returns_filtered.rolling(window=126).std().reindex(idx, method='ffill')
+        self.realized_vol_currency_log_12MROLL = currency_log_returns_filtered.rolling(window=252).std().reindex(idx, method='ffill')
+        self.realized_downside_vol_currency_1MROLL = currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_currency_3MROLL = currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_currency_6MROLL = currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_currency_12MROLL = currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+
+        # Price in base currency
+        fx_px_last_aligned = self.currency_object.px_last.reindex(idx, method='ffill')
+        price_base_currency = self.roll_settle_theoretical['Roll value'] * fx_px_last_aligned
+        price_base_currency_returns = price_base_currency.pct_change()
+        price_base_currency_log_returns = np.log(price_base_currency / price_base_currency.shift(1))
+        sd_price_base_currency_returns = price_base_currency_returns.std()
+        sd_price_base_currency_log_returns = price_base_currency_log_returns.std()
+        ub_price_base_currency_returns = price_base_currency_returns.mean() + sd_filter * sd_price_base_currency_returns
+        lb_price_base_currency_returns = price_base_currency_returns.mean() - sd_filter * sd_price_base_currency_returns
+        ub_price_base_currency_log_returns = price_base_currency_log_returns.mean() + sd_filter * sd_price_base_currency_log_returns
+        lb_price_base_currency_log_returns = price_base_currency_log_returns.mean() - sd_filter * sd_price_base_currency_log_returns
+        price_base_currency_returns_filtered = price_base_currency_returns[(price_base_currency_returns < ub_price_base_currency_returns) & (price_base_currency_returns > lb_price_base_currency_returns)]
+        price_base_currency_log_returns_filtered = price_base_currency_log_returns[(price_base_currency_log_returns < ub_price_base_currency_log_returns) & (price_base_currency_log_returns > lb_price_base_currency_log_returns)]
+
+        self.realized_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).std().reindex(idx, method='ffill')
+        self.realized_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).std().reindex(idx, method='ffill')
+        self.realized_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).std().reindex(idx, method='ffill')
+        self.realized_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).std().reindex(idx, method='ffill')
+        self.realized_vol_price_base_currency_log_1MROLL = price_base_currency_log_returns_filtered.rolling(window=21).std().reindex(idx, method='ffill')
+        self.realized_vol_price_base_currency_log_3MROLL = price_base_currency_log_returns_filtered.rolling(window=63).std().reindex(idx, method='ffill')
+        self.realized_vol_price_base_currency_log_6MROLL = price_base_currency_log_returns_filtered.rolling(window=126).std().reindex(idx, method='ffill')
+        self.realized_vol_price_base_currency_log_12MROLL = price_base_currency_log_returns_filtered.rolling(window=252).std().reindex(idx, method='ffill')
+        self.realized_downside_vol_price_base_currency_1MROLL = price_base_currency_returns_filtered.rolling(window=21).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_price_base_currency_3MROLL = price_base_currency_returns_filtered.rolling(window=63).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_price_base_currency_6MROLL = price_base_currency_returns_filtered.rolling(window=126).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+        self.realized_downside_vol_price_base_currency_12MROLL = price_base_currency_returns_filtered.rolling(window=252).apply(lambda x: downside_volatility_numba(x.values), raw=False).reindex(idx, method='ffill')
+
+    def build_fx_and_base_currency_vols_garch(self, sd_filter=5, step: int = 5):
+        """
+        Handles only the GARCH volatility calculations for currency_object and price_base_currency.
+        The 'step' parameter controls how often GARCH is computed (e.g., every 5th day).
+        """
+        idx = self.roll_settle_theoretical.index
+        currency_data = self.currency_object.px_last.loc[idx].dropna().reindex(idx, method='ffill')
+        currency_returns = currency_data.pct_change()
+        sd_currency_returns = currency_returns.std()
+        ub_currency_returns = currency_returns.mean() + sd_filter * sd_currency_returns
+        lb_currency_returns = currency_returns.mean() - sd_filter * sd_currency_returns
+        currency_returns_filtered = currency_returns[(currency_returns < ub_currency_returns) & (currency_returns > lb_currency_returns)]
+
+        # GARCH vols for currency
+        self.garch_volatility_currency_1MROLL = self.rolling_garch_parallel(currency_returns_filtered, estimation_window='1M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_currency_3MROLL = self.rolling_garch_parallel(currency_returns_filtered, estimation_window='3M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_currency_6MROLL = self.rolling_garch_parallel(currency_returns_filtered, estimation_window='6M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_currency_12MROLL = self.rolling_garch_parallel(currency_returns_filtered, estimation_window='12M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+
+        # Price in base currency
+        fx_px_last_aligned = self.currency_object.px_last.reindex(idx, method='ffill')
+        price_base_currency = self.roll_settle_theoretical['Roll value'] * fx_px_last_aligned
+        price_base_currency_returns = price_base_currency.pct_change()
+        sd_price_base_currency_returns = price_base_currency_returns.std()
+        ub_price_base_currency_returns = price_base_currency_returns.mean() + sd_filter * sd_price_base_currency_returns
+        lb_price_base_currency_returns = price_base_currency_returns.mean() - sd_filter * sd_price_base_currency_returns
+        price_base_currency_returns_filtered = price_base_currency_returns[(price_base_currency_returns < ub_price_base_currency_returns) & (price_base_currency_returns > lb_price_base_currency_returns)]
+
+        self.garch_volatility_price_base_currency_1MROLL = self.rolling_garch_parallel(price_base_currency_returns_filtered, estimation_window='1M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_price_base_currency_3MROLL = self.rolling_garch_parallel(price_base_currency_returns_filtered, estimation_window='3M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_price_base_currency_6MROLL = self.rolling_garch_parallel(price_base_currency_returns_filtered, estimation_window='6M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+        self.garch_volatility_price_base_currency_12MROLL = self.rolling_garch_parallel(price_base_currency_returns_filtered, estimation_window='12M', n_jobs=-1, step=step).reindex(idx, method='ffill')
+
     def build_realized_vol_undr(self, sd_filter: int = 5):
         """
         Build a realized volatility for the underlying.
@@ -1233,7 +1146,22 @@ class Future:
             self.realized_vol_undr_log_12MROLL = realized_vol_undr_log_12MROLL
         except ValueError:
             raise ValueError(f"Error in build_realized_vol_undr: {self.name} - {self.type} - {self.currency}")
-
+    
+    def build_theoretical_roll_settle(self, initial_investment=1000, date_delta=0, maturity_delta=0, start_date=None, end_date=None, sd_filter=5, skip_garch=True):
+        """
+        Orchestrates the full pipeline: roll, filter, classic vols, GARCH vols, and FX/base currency vols if needed.
+        """
+        self.build_theoretical_roll(initial_investment, date_delta, maturity_delta, start_date, end_date)
+        self.filter_returns(sd_filter)
+        self.build_classic_vols()
+        if not skip_garch:
+            self.build_garch_vols()
+        if self.currency_object is not None:
+            self.build_fx_and_base_currency_vols(sd_filter)
+        if self.currency_object is not None and not skip_garch:
+            self.build_fx_and_base_currency_vols_garch(sd_filter)
+        if self.underlying_data is not None:
+            self.build_realized_vol_undr(sd_filter)
 
 
 class Strategy:
@@ -1401,22 +1329,42 @@ class Strategy:
         rebalancing_dates = rebalancing_dates.sort_values()
         return rebalancing_dates
     
-    def build_weights(self, strategy_type: str, date: pd.Timestamp, estimation_window: str = '1M'):
+    def build_weights(self, strategy_type: str, date: pd.Timestamp, estimation_window: str = '1M', volatility_method: str = 'REALIZED_VOL'):
         """
-        Build the weights according to the strategy type.
-        Since some strategies are time dependent, we need to pass the date.
-        As more strategies are implemented, this function will be more complex.
+        Build the weights according to the strategy type and volatility method.
+        volatility_method: one of SUPPORTED_VOLATILITY_METHODS keys ('REALIZED_VOL', 'DOWNSIDE_VOL', 'GARCH')
         """
-        # Checking the strategy type
         if strategy_type not in SUPPORTED_STRATEGIES:
             raise ValueError(f"Strategy type {strategy_type} not supported. Supported types are: {list(SUPPORTED_STRATEGIES.keys())}.")
-        # If the strategy type is 'EQUAL_WEIGHTED', we don't care about the date or the estimation window
         if strategy_type == 'EQUAL_WEIGHTED':
             pass
         else:
             if estimation_window not in SUPPORTED_ESTIMATION_WINDOWS:
                 raise ValueError(f"Estimation window {estimation_window} not supported. Supported windows are: {list(SUPPORTED_ESTIMATION_WINDOWS.keys())}.")
-        
+            if volatility_method not in SUPPORTED_VOLATILITY_METHODS:
+                raise ValueError(f"Volatility method {volatility_method} not supported. Supported methods are: {list(SUPPORTED_VOLATILITY_METHODS.keys())}.")
+
+        # Helper to get the correct attribute name
+        def get_vol_attr(future, estimation_window, volatility_method):
+            # Base name
+            if volatility_method == 'REALIZED_VOL':
+                if future.currency_object is not None:
+                    return f"realized_vol_price_base_currency_{estimation_window}ROLL"
+                else:
+                    return f"realized_vol_roll_{estimation_window}ROLL"
+            elif volatility_method == 'DOWNSIDE_VOL':
+                if future.currency_object is not None:
+                    return f"realized_downside_vol_price_base_currency_{estimation_window}ROLL"
+                else:
+                    return f"realized_downside_vol_roll_{estimation_window}ROLL"
+            elif volatility_method == 'GARCH':
+                if future.currency_object is not None:
+                    return f"garch_volatility_currency_{estimation_window}ROLL"
+                else:
+                    return f"garch_volatility_{estimation_window}ROLL"
+            else:
+                raise ValueError(f"Volatility method {volatility_method} not implemented.")
+
         # Building the weights
         if strategy_type == 'EQUAL_WEIGHTED':
             weights = {}
@@ -1426,137 +1374,49 @@ class Strategy:
         elif strategy_type == 'INVERSE_VARIANCE':
             weights = {}
             for future in self.futures:
-                # Getting the realized volatility for the future
-                # Which is already calculated in the future class
-                # But it has to match the estimation window
                 realized_vol = None
-                if future.currency_object is None:
-                    try:
-                        if estimation_window == '1M':
-                            realized_vol = future.realized_vol_roll_1MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_roll_1MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_roll_1MROLL.loc[yesterday]
-                        elif estimation_window == '3M':
-                            realized_vol = future.realized_vol_roll_3MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_roll_3MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_roll_3MROLL.loc[yesterday]
-                        elif estimation_window == '6M':
-                            realized_vol = future.realized_vol_roll_6MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_roll_6MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_roll_6MROLL.loc[yesterday]
-                        elif estimation_window == '12M':
-                            realized_vol = future.realized_vol_roll_12MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_roll_12MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_roll_12MROLL.loc[yesterday]
-                    except KeyError:
-                        raise KeyError(f"Realized volatility for future {future.name} not available for date {date}.")
-                    if realized_vol is None:
-                        raise ValueError(f"Realized volatility for future {future.name} is None for date {date}.")
+                vol_attr = get_vol_attr(future, estimation_window, volatility_method)
+                try:
+                    realized_vol = getattr(future, vol_attr).loc[date]
                     if realized_vol == 0:
-                        raise ValueError(f"Realized volatility for future {future.name} is 0 for date {date}.")
-                    if pd.isna(realized_vol):
-                        raise ValueError(f"Realized volatility for future {future.name} is NaN for date {date}.")
-                    # The weight is the inverse of the realized volatility squared
-                    weights[future.name] = 1 / (realized_vol ** 2)
-                    if weights[future.name] == np.nan:
-                        raise ValueError(f"Weight for future {future.name} is NaN.")
-                else: # We will have to take the base currency vol and not the normal realized vol
-                    try:
-                        if estimation_window == '1M':
-                            realized_vol = future.realized_vol_currency_1MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_currency_1MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_currency_1MROLL.loc[yesterday]
-                        elif estimation_window == '3M':
-                            realized_vol = future.realized_vol_currency_3MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_currency_3MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_currency_3MROLL.loc[yesterday]
-                        elif estimation_window == '6M':
-                            realized_vol = future.realized_vol_currency_6MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_currency_6MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_currency_6MROLL.loc[yesterday]
-                        elif estimation_window == '12M':
-                            realized_vol = future.realized_vol_currency_12MROLL.loc[date]
-                            if realized_vol == 0:
-                                # We try to get the former value
-                                date_index = future.realized_vol_currency_12MROLL.index
-                                yesterday = date_index[date_index.get_loc(date) - 1]
-                                realized_vol = future.realized_vol_currency_12MROLL.loc[yesterday]
-                    except KeyError:
-                        raise KeyError(f"Realized volatility for future {future.name} not available for date {date}.")
-                    if realized_vol is None:
-                        raise ValueError(f"Realized volatility for future {future.name} is None for date {date}.")
-                    if realized_vol == 0:
-                        raise ValueError(f"Realized volatility for future {future.name} is 0 for date {date}.")
-                    if pd.isna(realized_vol):
-                        raise ValueError(f"Realized volatility for future {future.name} is NaN for date {date}.")
-                    # The weight is
-                    # the inverse of the realized volatility squared
-                    weights[future.name] = 1 / (realized_vol ** 2)
-                    if weights[future.name] == np.nan:
-                        raise ValueError(f"Weight for future {future.name} is NaN.")
-            # Normalizing the weights
-            # total_weight = sum(weights.values())
-            #for future in self.futures:
-            #    weights[future.name] = weights[future.name] / total_weight
+                        date_index = getattr(future, vol_attr).index
+                        yesterday = date_index[date_index.get_loc(date) - 1]
+                        realized_vol = getattr(future, vol_attr).loc[yesterday]
+                except KeyError:
+                    raise KeyError(f"Volatility ({vol_attr}) for future {future.name} not available for date {date}.")
+                if realized_vol is None:
+                    raise ValueError(f"Volatility ({vol_attr}) for future {future.name} is None for date {date}.")
+                if realized_vol == 0:
+                    raise ValueError(f"Volatility ({vol_attr}) for future {future.name} is 0 for date {date}.")
+                if pd.isna(realized_vol):
+                    raise ValueError(f"Volatility ({vol_attr}) for future {future.name} is NaN for date {date}.")
+                weights[future.name] = 1 / (realized_vol ** 2)
+                if pd.isna(weights[future.name]):
+                    raise ValueError(f"Weight for future {future.name} is NaN.")
         else:
             raise NotImplementedError(f"Strategy type {strategy_type} not implemented yet.")
-        
+
         # Checking if the final weights are valid
         for future in self.futures:
             if weights[future.name] is None:
                 raise ValueError(f"Weight for future {future.name} is None.")
-            
-        for future in self.futures:
-            if weights[future.name] == np.nan:
+            if pd.isna(weights[future.name]):
                 raise ValueError(f"Weight for future {future.name} is NaN.")
-        
-        # Checking if the weights sum to 1
-        total_weight = 0
-        for future in self.futures:
-            if weights[future.name] is None:
-                raise ValueError(f"Weight for future {future.name} is None.")
-            if weights[future.name] == np.nan:
-                raise ValueError(f"Weight for future {future.name} is NaN.")
-            total_weight += weights[future.name]
-        if total_weight != 1:
-            # We normalize the weights
+
+        # Normalize weights to sum to 1
+        total_weight = sum(weights[future.name] for future in self.futures)
+        if not np.isclose(total_weight, 1.0, atol=1e-8):
             for future in self.futures:
                 weights[future.name] = weights[future.name] / total_weight
 
-        total_weight = 0
-        for future in self.futures:
-            if weights[future.name] is None:
-                raise ValueError(f"Weight for future {future.name} is None.")
-            if weights[future.name] == np.nan:
-                raise ValueError(f"Weight for future {future.name} is NaN.")
-            total_weight += weights[future.name]
+        # Final check
+        total_weight = sum(weights[future.name] for future in self.futures)
         if not np.isclose(total_weight, 1.0, atol=1e-8):
             raise ValueError(f"Weights do not sum to 1. Total weight: {total_weight}.")
         return weights
     
     # @njit(cache=True)
-    def simulate_strategy_theoretical(self, strategy_type: str, initial_investment: float = 1000, date_delta: int = 0, maturity_delta: int = 0, start_date: pd.Timestamp = None, end_date: pd.Timestamp = None, rebalance_frequency: str = '3M', estimation_window: str = '1M'):
+    def simulate_strategy_theoretical(self, strategy_type: str, initial_investment: float = 1000, date_delta: int = 0, maturity_delta: int = 0, start_date: pd.Timestamp = None, end_date: pd.Timestamp = None, rebalance_frequency: str = '3M', estimation_window: str = '1M', volatility_method: str = 'REALIZED_VOL'):
         """
         Simulate the strategy, by rolling the futures and applying the specified portfolio construction strategy.
         The simulation is done in a theoretical way, by rolling using only PX_SETTLE.
@@ -1603,7 +1463,7 @@ class Strategy:
             first_variance_date = None
             for date in dates:
                 try:
-                    weights = self.build_weights(strategy_type, date, estimation_window)
+                    weights = self.build_weights(strategy_type, date, estimation_window, volatility_method)
                     try:
                         total_weight = sum(weights.values())
                     except:
@@ -1680,7 +1540,7 @@ class Strategy:
             strategy_simulation[future.name]['Rebalancing (BOOLEAN)'] = np.nan
         
         # Initializing the portfolio - for the starting date
-        weights = self.build_weights(strategy_type, start_date, estimation_window)
+        weights = self.build_weights(strategy_type, start_date, estimation_window, volatility_method)
         strategy_simulation['Portfolio'].loc[start_date, 'Portfolio value'] = initial_investment
         strategy_simulation['Portfolio'].loc[start_date, 'Transaction (BOOLEAN)'] = True
         strategy_simulation['Portfolio'].loc[start_date, 'Rolling (BOOLEAN)'] = False
@@ -1814,7 +1674,7 @@ class Strategy:
             if pd.Timestamp(date) in rebalancing_dates or date.date() in rebalancing_dates.date:
                 # We get the weights for the strategy
                 try:
-                    weights = self.build_weights(strategy_type, date, estimation_window)
+                    weights = self.build_weights(strategy_type, date, estimation_window, volatility_method)
                 except ValueError:
                     # If realized volatility is not available for today, which is the ValueError we are raising in the build_weights function
                     # We will not rebalance today, and we will try to rebalance tomorrow
@@ -1935,4 +1795,25 @@ class Strategy:
                 total_weight += strategy_simulation['Weights'].loc[date, future.name]
             if not np.isclose(total_weight, 1.0, atol=1e-8):
                 raise ValueError(f"Weights do not sum to 1 at date {date}. Total weight: {total_weight}.")
+        
+        
+        # Now we will build performance metrics
+        # Annualized return
+        # Annualized volatility
+        # Sharpe ratio (annualized)
+        # Sortino ratio (annualized)
+        # Maximum drawdown
+        strategy_simulation['Performance'] = pd.DataFrame(index=[start_date], columns=['Annualized return', 'Annualized volatility', 'Sharpe ratio', 'Sortino ratio', 'Maximum drawdown'])
+        # Annualized return
+        strategy_simulation['Performance']['Annualized return'] = (strategy_simulation['Portfolio']['Portfolio value'].iloc[-1] / strategy_simulation['Portfolio']['Portfolio value'].iloc[0]) ** (1 / ((strategy_simulation['Portfolio'].index[-1] - strategy_simulation['Portfolio'].index[0]).days / 365)) - 1
+        # Annualized volatility
+        strategy_simulation['Performance']['Annualized volatility'] = strategy_simulation['Portfolio']['Portfolio value'].pct_change().std() * np.sqrt(252)
+        # Sharpe ratio
+        strategy_simulation['Performance']['Sharpe ratio'] = strategy_simulation['Performance']['Annualized return'] / strategy_simulation['Performance']['Annualized volatility']
+        # Sortino ratio
+        downside_volatility = strategy_simulation['Portfolio']['Portfolio value'].pct_change().where(strategy_simulation['Portfolio']['Portfolio value'].pct_change() < 0).std() * np.sqrt(252)
+        strategy_simulation['Performance']['Sortino ratio'] = strategy_simulation['Performance']['Annualized return'] / downside_volatility
+        # Maximum drawdown
+        strategy_simulation['Performance']['Maximum drawdown'] = (strategy_simulation['Portfolio']['Portfolio value'].cummax() - strategy_simulation['Portfolio']['Portfolio value']).max() / strategy_simulation['Portfolio']['Portfolio value'].cummax().max()
+        
         return strategy_simulation
