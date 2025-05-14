@@ -1329,6 +1329,49 @@ class Strategy:
         rebalancing_dates = rebalancing_dates.sort_values()
         return rebalancing_dates
     
+    def _safe_px(self, px_ask, px_settle, date):
+        """Return PX_ASK if not NA, else PX_SETTLE for a given date."""
+        try:
+            val = px_ask.loc[date]
+            settle_val = px_settle.loc[date]
+            if pd.isna(val) or pd.isna(settle_val):
+                return settle_val
+            # Check for scale difference and 10% threshold
+            if settle_val == 0:
+                return val  # avoid division by zero, fallback to ask
+            ratio = val / settle_val
+            if ratio < 0.1 or ratio > 10:
+            # If ask and settle are on different scales, fallback to settle
+                return settle_val
+            # Now check if ask is within 10% of settle
+            if abs(val - settle_val) / abs(settle_val) > 0.10:
+                return settle_val
+            return val
+        except Exception:
+            return px_settle.loc[date]
+
+    def _safe_bid(self, px_bid, px_settle, date):
+        """Return PX_BID if not NA, else PX_SETTLE for a given date."""
+        try:
+            val = px_bid.loc[date]
+            settle_val = px_settle.loc[date]
+            if pd.isna(val) or pd.isna(settle_val):
+                return settle_val
+            # Check for scale difference and 10% threshold
+            if settle_val == 0:
+                return val
+            # avoid division by zero, fallback to bid
+            ratio = val / settle_val
+            if ratio < 0.1 or ratio > 10:
+                return settle_val
+            # Now check if bid is within 10% of settle
+            if abs(val - settle_val) / abs(settle_val) > 0.10:
+                return settle_val
+            return val
+        except Exception:
+            return px_settle.loc[date]
+    
+    
     def build_weights(self, strategy_type: str, date: pd.Timestamp, estimation_window: str = '1M', volatility_method: str = 'REALIZED_VOL'):
         """
         Build the weights according to the strategy type and volatility method.
@@ -1817,3 +1860,168 @@ class Strategy:
         strategy_simulation['Performance']['Maximum drawdown'] = (strategy_simulation['Portfolio']['Portfolio value'].cummax() - strategy_simulation['Portfolio']['Portfolio value']).max() / strategy_simulation['Portfolio']['Portfolio value'].cummax().max()
         
         return strategy_simulation
+    
+    
+    # Now, not theoretical, we will account for transaction costs
+    def simulate_strategy_ntc(self, strategy_type: str, initial_investment: float = 1000, date_delta: int = 0, maturity_delta: int = 0, start_date: pd.Timestamp = None, end_date: pd.Timestamp = None, rebalance_frequency: str = '3M', estimation_window: str = '1M', volatility_method: str = 'REALIZED_VOL'):
+        """
+        Simulate the strategy, by rolling the futures and applying the specified portfolio construction strategy.
+        Transaction costs are accounted for using bid/ask, but FX transactions always use the settle price (no FX transaction costs).
+        """
+        # --- Setup and checks ---
+        if strategy_type not in SUPPORTED_STRATEGIES:
+            raise ValueError(f"Strategy type {strategy_type} not supported.")
+        if rebalance_frequency not in SUPPORTED_REBAL_FREQS:
+            raise ValueError(f"Rebalance frequency {rebalance_frequency} not supported.")
+        if estimation_window not in SUPPORTED_ESTIMATION_WINDOWS:
+            raise ValueError(f"Estimation window {estimation_window} not supported.")
+
+        start_date = pd.to_datetime(start_date or self.start_date)
+        end_date = pd.to_datetime(end_date or self.end_date)
+        if start_date > end_date:
+            raise ValueError("Start date must be before end date.")
+
+        dates = pd.to_datetime(self.get_all_dates())
+        dates = dates[(dates >= start_date) & (dates <= end_date)].sort_values()
+
+        # Find first valid weights date if needed
+        if strategy_type != 'EQUAL_WEIGHTED':
+            for date in dates:
+                try:
+                    weights = self.build_weights(strategy_type, date, estimation_window, volatility_method)
+                    if np.isclose(sum(weights.values()), 1.0, atol=1e-8):
+                        start_date = date
+                        break
+                except Exception:
+                    continue
+            dates = dates[dates >= start_date]
+
+        rebalancing_dates = pd.DatetimeIndex(self.build_rebalancing_calendar(rebalance_frequency, start_date, end_date))
+
+        # --- Prepare simulation containers ---
+        strategy_sim = {
+            'Rebalancing calendar': rebalancing_dates,
+            'Portfolio': pd.DataFrame(index=dates, columns=[
+                'Portfolio value', 'Transaction (BOOLEAN)', 'Rolling (BOOLEAN)', 'Rebalancing (BOOLEAN)',
+                'Transaction costs', 'Transaction costs due to rolling', 'Transaction costs due to rebalancing', 'Transaction costs due to FX'
+            ]),
+            'Weights': pd.DataFrame(index=dates, columns=[f.name for f in self.futures])
+        }
+        for f in self.futures:
+            strategy_sim[f.name] = pd.DataFrame(index=dates, columns=[
+                'Position value', 'Active contract', 'Number of contracts', 'Contract PX_SETTLE', 'Transaction',
+                'Transaction (BOOLEAN)', 'Transaction costs', 'Rolling (BOOLEAN)', 'Transaction costs due to rolling',
+                'Rebalancing (BOOLEAN)', 'Transaction costs due to rebalancing', 'Transaction costs due to FX'
+            ])
+
+        # --- Initial allocation ---
+        weights = self.build_weights(strategy_type, start_date, estimation_window, volatility_method)
+        strategy_sim['Portfolio'].loc[start_date, 'Portfolio value'] = initial_investment
+        for f in self.futures:
+            contract = f.get_relevant_contract(start_date, date_delta, maturity_delta)
+            px_settle = contract.PX_SETTLE.loc[start_date]
+            fx = f.currency_object.px_last.loc[start_date] if f.currency_object is not None else 1
+            px = px_settle * fx
+            alloc = initial_investment * weights[f.name]
+            n_contracts = alloc / px if px > 0 else 0
+            strategy_sim[f.name].loc[start_date, ['Position value', 'Active contract', 'Number of contracts', 'Contract PX_SETTLE']] = [alloc, contract.name, n_contracts, px]
+            strategy_sim[f.name].loc[start_date, 'Transaction'] = f'Buy: {contract.name} at {px:.2f}, totalling {alloc:.2f}'
+            strategy_sim[f.name].loc[start_date, ['Transaction (BOOLEAN)', 'Rolling (BOOLEAN)', 'Rebalancing (BOOLEAN)']] = [True, False, True]
+            strategy_sim[f.name].loc[start_date, ['Transaction costs', 'Transaction costs due to rolling', 'Transaction costs due to rebalancing', 'Transaction costs due to FX']] = [0, 0, 0, 0]
+            strategy_sim['Weights'].loc[start_date, f.name] = weights[f.name]
+
+        # --- Main simulation loop ---
+        for i, date in enumerate(dates[1:], 1):
+            yesterday = dates[i - 1]
+            strategy_sim['Portfolio'].loc[date, ['Transaction (BOOLEAN)', 'Rolling (BOOLEAN)', 'Rebalancing (BOOLEAN)']] = [False, False, False]
+            # Value portfolio before transactions
+            port_val = 0
+            for f in self.futures:
+                contract = f.get_relevant_contract(yesterday, date_delta, maturity_delta)
+                fx = f.currency_object.px_last.loc[date] if f.currency_object is not None else 1
+                px = contract.PX_SETTLE.loc[date] * fx
+                n_contracts = strategy_sim[f.name].loc[yesterday, 'Number of contracts']
+                val = n_contracts * px
+                strategy_sim[f.name].loc[date, ['Position value', 'Active contract', 'Number of contracts', 'Contract PX_SETTLE']] = [val, contract.name, n_contracts, px]
+                port_val += val
+
+            strategy_sim['Portfolio'].loc[date, 'Portfolio value'] = port_val
+
+            # --- Rolling ---
+            for f in self.futures:
+                if f.is_relevant_maturity_date(date, date_delta, maturity_delta):
+                    old_contract = f.get_relevant_contract(yesterday, date_delta, maturity_delta)
+                    new_contract = f.get_relevant_contract(date, date_delta, maturity_delta)
+                    fx = f.currency_object.px_last.loc[date] if f.currency_object is not None else 1
+                    px_bid = self._safe_bid(old_contract.PX_BID, old_contract.PX_SETTLE, date) * fx
+                    px_ask = self._safe_px(new_contract.PX_ASK, new_contract.PX_SETTLE, date) * fx
+                    px_settle = new_contract.PX_SETTLE.loc[date] * fx
+                    n_contracts = strategy_sim[f.name].loc[yesterday, 'Number of contracts']
+                    val = n_contracts * px_settle
+                    n_new = val / px_settle if px_settle > 0 else 0
+                    strategy_sim[f.name].loc[date, ['Active contract', 'Number of contracts', 'Contract PX_SETTLE', 'Position value']] = [new_contract.name, n_new, px_settle, val]
+                    strategy_sim[f.name].loc[date, ['Transaction (BOOLEAN)', 'Rolling (BOOLEAN)', 'Rebalancing (BOOLEAN)']] = [True, True, False]
+                    strategy_sim[f.name].loc[date, 'Transaction'] = f'Roll: {old_contract.name} -> {new_contract.name}'
+                    # No transaction cost for rolling
+                    strategy_sim[f.name].loc[date, ['Transaction costs', 'Transaction costs due to rolling', 'Transaction costs due to rebalancing', 'Transaction costs due to FX']] = [0, 0, 0, 0]
+
+            # --- Rebalancing ---
+            if date in rebalancing_dates:
+                weights = self.build_weights(strategy_type, date, estimation_window, volatility_method)
+                for f in self.futures:
+                    contract = f.get_relevant_contract(date, date_delta, maturity_delta)
+                    fx = f.currency_object.px_last.loc[date] if f.currency_object is not None else 1
+                    px = contract.PX_SETTLE.loc[date] * fx
+                    alloc = strategy_sim['Portfolio'].loc[date, 'Portfolio value'] * weights[f.name]
+                    n_contracts = alloc / px if px > 0 else 0
+                    strategy_sim[f.name].loc[date, ['Number of contracts', 'Position value', 'Active contract', 'Contract PX_SETTLE']] = [n_contracts, alloc, contract.name, px]
+                    strategy_sim[f.name].loc[date, 'Transaction'] = f'Rebalance: {contract.name} at {px:.2f}, alloc {alloc:.2f}'
+                    strategy_sim[f.name].loc[date, ['Transaction (BOOLEAN)', 'Rolling (BOOLEAN)', 'Rebalancing (BOOLEAN)']] = [True, False, True]
+                    # Transaction cost: difference between settle and bid/ask (no FX cost)
+                    prev_contract = f.get_relevant_contract(yesterday, date_delta, maturity_delta)
+                    prev_n = strategy_sim[f.name].loc[yesterday, 'Number of contracts']
+                    prev_px = prev_contract.PX_SETTLE.loc[date] * (f.currency_object.px_last.loc[date] if f.currency_object is not None else 1)
+                    tc = abs(n_contracts - prev_n) * abs(px - prev_px)
+                    strategy_sim[f.name].loc[date, ['Transaction costs', 'Transaction costs due to rolling', 'Transaction costs due to rebalancing', 'Transaction costs due to FX']] = [tc, 0, tc, 0]
+                    strategy_sim['Weights'].loc[date, f.name] = weights[f.name]
+                strategy_sim['Portfolio'].loc[date, ['Transaction (BOOLEAN)', 'Rebalancing (BOOLEAN)']] = [True, True]
+
+            # --- Fill missing costs with 0 ---
+            for f in self.futures:
+                for col in ['Transaction costs', 'Transaction costs due to rolling', 'Transaction costs due to rebalancing', 'Transaction costs due to FX']:
+                    if pd.isna(strategy_sim[f.name].loc[date, col]):
+                        strategy_sim[f.name].loc[date, col] = 0
+
+            # --- Forward fill if needed ---
+            for f in self.futures:
+                for col in ['Position value', 'Number of contracts', 'Contract PX_SETTLE']:
+                    if pd.isna(strategy_sim[f.name].loc[date, col]) or strategy_sim[f.name].loc[date, col] == 0:
+                        strategy_sim[f.name].loc[date, col] = strategy_sim[f.name].loc[yesterday, col]
+
+            # --- Portfolio value and weights ---
+            strategy_sim['Portfolio'].loc[date, 'Portfolio value'] = sum(strategy_sim[f.name].loc[date, 'Position value'] for f in self.futures)
+            for f in self.futures:
+                strategy_sim['Weights'].loc[date, f.name] = strategy_sim[f.name].loc[date, 'Position value'] / strategy_sim['Portfolio'].loc[date, 'Portfolio value']
+
+            # --- Portfolio transaction costs ---
+            for col in ['Transaction costs', 'Transaction costs due to rolling', 'Transaction costs due to rebalancing', 'Transaction costs due to FX']:
+                strategy_sim['Portfolio'].loc[date, col] = sum(strategy_sim[f.name].loc[date, col] for f in self.futures)
+
+        # --- Performance metrics ---
+        perf = strategy_sim['Portfolio']
+        perf_df = pd.DataFrame(index=[start_date], columns=[
+            'Annualized return', 'Annualized volatility', 'Sharpe ratio', 'Sortino ratio', 'Maximum drawdown',
+            'Total transaction costs', 'Total transaction costs due to rolling', 'Total transaction costs due to rebalancing'
+        ])
+        perf_df['Annualized return'] = (perf['Portfolio value'].iloc[-1] / perf['Portfolio value'].iloc[0]) ** (1 / ((perf.index[-1] - perf.index[0]).days / 365)) - 1
+        perf_df['Annualized volatility'] = perf['Portfolio value'].pct_change().std() * np.sqrt(252)
+        perf_df['Sharpe ratio'] = perf_df['Annualized return'] / perf_df['Annualized volatility']
+        downside_vol = perf['Portfolio value'].pct_change().where(lambda x: x < 0).std() * np.sqrt(252)
+        perf_df['Sortino ratio'] = perf_df['Annualized return'] / downside_vol
+        perf_df['Maximum drawdown'] = (perf['Portfolio value'].cummax() - perf['Portfolio value']).max() / perf['Portfolio value'].cummax().max()
+        perf_df['Total transaction costs'] = perf['Transaction costs'].sum()
+        perf_df['Total transaction costs due to rolling'] = perf['Transaction costs due to rolling'].sum()
+        perf_df['Total transaction costs due to rebalancing'] = perf['Transaction costs due to rebalancing'].sum()
+        strategy_sim['Performance'] = perf_df
+
+        return strategy_sim
